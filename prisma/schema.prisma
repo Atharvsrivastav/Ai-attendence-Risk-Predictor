@@ -1,0 +1,136 @@
+// Prisma Schema for AI Attendance Risk Prediction System
+// Configured with SQLite for zero-configuration local execution, 
+// and 100% compatible with PostgreSQL (see prisma/schema.postgres.prisma).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         String    @default("STUDENT") // ADMIN, FACULTY, STUDENT
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  student      Student?
+  faculty      Faculty?
+}
+
+model Student {
+  id                    String             @id @default(cuid())
+  userId                String             @unique
+  user                  User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rollNumber            String             @unique
+  department            String
+  semester              Int
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  enrollments           Enrollment[]
+  attendanceRecords     AttendanceRecord[]
+  riskPredictions       RiskPrediction[]
+  riskHistories         RiskHistory[]
+}
+
+model Faculty {
+  id           String              @id @default(cuid())
+  userId       String              @unique
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  employeeId   String              @unique
+  department   String
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  subjects     Subject[]
+  sessions     AttendanceSession[]
+}
+
+model Subject {
+  id           String              @id @default(cuid())
+  code         String              @unique
+  name         String
+  facultyId    String
+  faculty      Faculty             @relation(fields: [facultyId], references: [id], onDelete: Restrict)
+  credits      Int                 @default(3)
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  enrollments  Enrollment[]
+  sessions     AttendanceSession[]
+  predictions  RiskPrediction[]
+}
+
+model Enrollment {
+  id        String   @id @default(cuid())
+  studentId String
+  subjectId String
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subject   Subject  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([studentId, subjectId])
+}
+
+model AttendanceSession {
+  id          String             @id @default(cuid())
+  subjectId   String
+  facultyId   String
+  sessionDate DateTime           @default(now())
+  topic       String?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  subject     Subject            @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  faculty     Faculty            @relation(fields: [facultyId], references: [id], onDelete: Restrict)
+  records     AttendanceRecord[]
+}
+
+model AttendanceRecord {
+  id        String            @id @default(cuid())
+  sessionId String
+  studentId String
+  status    String            @default("PRESENT") // PRESENT, ABSENT, LATE, EXCUSED
+  remarks   String?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  session   AttendanceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  student   Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, studentId])
+}
+
+model RiskPrediction {
+  id                  String   @id @default(cuid())
+  studentId           String
+  subjectId           String?
+  riskLevel           String   // LOW, MEDIUM, HIGH, CRITICAL
+  riskScore           Float    // Probability 0.0 - 1.0
+  confidence          Float    @default(0.85)
+  contributingFactors String   // JSON serialized array of factors
+  recommendation      String
+  modelVersion        String   @default("decision-tree-v1.0")
+  createdAt           DateTime @default(now())
+
+  student             Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subject             Subject? @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+}
+
+model RiskHistory {
+  id            String   @id @default(cuid())
+  studentId     String
+  riskLevel     String   // LOW, MEDIUM, HIGH, CRITICAL
+  riskScore     Float
+  attendancePct Float
+  calculatedAt  DateTime @default(now())
+
+  student       Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+}

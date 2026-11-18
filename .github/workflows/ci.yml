@@ -2,60 +2,14 @@ name: CI Pipeline
 
 on:
   push:
-    branches: [ main, "fix/**", "feat/**" ]
+    branches: [ main, "feature/**", "fix/**", "feat/**" ]
   pull_request:
     branches: [ main ]
 
 jobs:
-  backend-build-and-test:
-    name: Backend Build & C++ Tests
+  cpp-fullstack-build-and-test:
+    name: C++20 Full-Stack Build & Verification
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake build-essential libasio-dev
-
-      - name: Configure CMake
-        run: |
-          cmake -B backend/build -S backend -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build C++ Targets
-        run: |
-          cmake --build backend/build --config Release
-
-      - name: Run C++ Automated Test Suite
-        env:
-          JWT_SECRET: "ci_production_ready_cryptographic_secret_key_256_bits_length"
-        run: |
-          ./backend/build/attendance_tests
-
-  frontend-build:
-    name: Frontend Build & Typecheck
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'npm'
-
-      - name: Install Node Dependencies
-        run: npm ci
-
-      - name: Build Next.js Application
-        run: npm run build
-
-  security-e2e-verification:
-    name: Security & REST Verification
-    runs-on: ubuntu-latest
-    needs: [backend-build-and-test, frontend-build]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -65,18 +19,31 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake build-essential libasio-dev python3
 
-      - name: Build Backend
+      - name: Configure CMake
         run: |
-          cmake -B backend/build -S backend -DCMAKE_BUILD_TYPE=Release
-          cmake --build backend/build --config Release
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 
-      - name: Start C++ Backend Server
+      - name: Build C++ Targets
+        run: |
+          cmake --build build --config Release
+
+      - name: Run C++ Automated Unit & Integration Tests
         env:
           JWT_SECRET: "ci_production_ready_cryptographic_secret_key_256_bits_length"
         run: |
-          ./backend/build/attendance_server &
+          ./build/attendance_tests
+
+      - name: Launch Full-Stack C++ Web Server
+        env:
+          JWT_SECRET: "ci_production_ready_cryptographic_secret_key_256_bits_length"
+        run: |
+          ./build/attendance_server &
           sleep 3
 
-      - name: Run Comprehensive Security Verification Suite
+      - name: Run Full-Stack Web App UI & Session Verification
+        run: |
+          python3 scripts/verify_fullstack_cpp.py
+
+      - name: Run Comprehensive Security & REST API Verification
         run: |
           python3 scripts/verify_security_and_api.py

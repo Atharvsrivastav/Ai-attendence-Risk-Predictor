@@ -27,6 +27,26 @@ struct AdminOverviewData {
     std::vector<attendance::models::StudentAttendanceProfile> atRiskProfiles;
 };
 
+struct AdminAnalyticsData {
+    int totalStudents{0};
+    int totalFaculty{0};
+    int totalSubjects{0};
+    int totalSessions{0};
+    double averageAttendance{0.0};
+    int belowThresholdCount{0};
+    int highRiskCount{0};
+    int criticalRiskCount{0};
+    int lowRiskCount{0};
+    int mediumRiskCount{0};
+    std::vector<std::string> subjectCodes;
+    std::vector<double> subjectAverages;
+    std::vector<std::string> timelineLabels;
+    std::vector<double> timelineAverages;
+    std::vector<attendance::models::StudentAttendanceProfile> profiles;
+    std::vector<attendance::models::Subject> subjects;
+    nlohmann::json alerts;
+};
+
 class AdminViews {
 public:
     static std::string renderOverview(
@@ -582,6 +602,270 @@ public:
 
         ss << "    </tbody>\n";
         ss << "  </table>\n";
+        ss << "</div>\n";
+
+        return LayoutView::renderLayout(ctx, ss.str());
+    }
+
+    // Deep Institutional Analytics & Risk Telemetry View
+    static std::string renderDeepAnalytics(
+        const AdminAnalyticsData& data,
+        const PageContext& ctx,
+        double threshold = 75.0) 
+    {
+        std::stringstream ss;
+
+        // Page Header
+        ss << "<div class=\"page-header\">\n";
+        ss << "  <div>\n";
+        ss << "    <h1 class=\"page-title\">Institutional Deep Analytics & Risk Telemetry</h1>\n";
+        ss << "    <p class=\"page-subtitle\">Predictive enrollment risk distribution, subject engagement patterns, and cohort trajectory modeling.</p>\n";
+        ss << "  </div>\n";
+        ss << "  <div style=\"display:flex; gap:10px;\">\n";
+        ss << "    <a href=\"/admin\" class=\"btn btn-secondary\">&larr; Overview</a>\n";
+        ss << "    <a href=\"/admin/students\" class=\"btn btn-secondary\">Student Directory</a>\n";
+        ss << "    <a href=\"/reports\" class=\"btn btn-primary\">Export Telemetry</a>\n";
+        ss << "  </div>\n";
+        ss << "</div>\n";
+
+        // Metrics Grid (6 cards)
+        ss << "<div class=\"metrics-grid\">\n";
+        std::stringstream ssAvg;
+        ssAvg << std::fixed << std::setprecision(1) << data.averageAttendance << "%";
+        ss << LayoutView::renderStatCard("Cohort Average", ssAvg.str(), "Across all curriculum", (data.averageAttendance >= threshold ? "#10b981" : "#f59e0b"));
+
+        double deficitPct = data.totalStudents > 0 ? (data.belowThresholdCount * 100.0 / data.totalStudents) : 0.0;
+        std::stringstream ssDef;
+        ssDef << data.belowThresholdCount << " (" << std::fixed << std::setprecision(1) << deficitPct << "%)";
+        ss << LayoutView::renderStatCard("Shortage Deficit", ssDef.str(), "Below " + std::to_string(static_cast<int>(threshold)) + "% minimum", "#ef4444", "", "/reports");
+
+        ss << LayoutView::renderStatCard("Critical / High Risk", std::to_string(data.criticalRiskCount + data.highRiskCount), "Immediate intervention target", "#dc2626");
+        ss << LayoutView::renderStatCard("Safe Cohort", std::to_string(data.lowRiskCount), "Meeting attendance benchmarks", "#10b981");
+        ss << LayoutView::renderStatCard("Curriculum Modules", std::to_string(data.totalSubjects), "Active academic courses", "#8b5cf6", "", "/admin/subjects");
+        ss << LayoutView::renderStatCard("Classroom Sessions", std::to_string(data.totalSessions), "Conducted lectures", "#06b6d4");
+        ss << "</div>\n";
+
+        // Visual Charts Grid: 3 Charts
+        // Row 1: Subject Bar Chart + Risk Donut Chart
+        ss << "<div class=\"charts-grid\">\n";
+        
+        // Subject Performance Bar Chart
+        ss << "  <div class=\"chart-card\">\n";
+        ss << "    <div class=\"chart-header\">\n";
+        ss << "      <div>\n";
+        ss << "        <h3 class=\"chart-title\">Subject-wise Attendance Distribution</h3>\n";
+        ss << "        <p class=\"chart-subtitle\">Average student attendance benchmarked against institutional " << threshold << "% threshold</p>\n";
+        ss << "      </div>\n";
+        ss << "    </div>\n";
+        ss << "    <div class=\"chart-container\">\n";
+        ss << SvgCharts::renderSubjectBarChart(data.subjectCodes, data.subjectAverages, threshold, 520, 240);
+        ss << "    </div>\n";
+        ss << "  </div>\n";
+
+        // Risk Donut Chart
+        ss << "  <div class=\"chart-card\">\n";
+        ss << "    <div class=\"chart-header\">\n";
+        ss << "      <div>\n";
+        ss << "        <h3 class=\"chart-title\">Ensemble ML Risk Classification</h3>\n";
+        ss << "        <p class=\"chart-subtitle\">Predictive distribution across entire active student body</p>\n";
+        ss << "      </div>\n";
+        ss << "    </div>\n";
+        ss << "    <div class=\"chart-container\">\n";
+        ss << SvgCharts::renderRiskDistributionDonut(data.lowRiskCount, data.mediumRiskCount, data.highRiskCount, data.criticalRiskCount, 220);
+        ss << "    </div>\n";
+        ss << "  </div>\n";
+
+        ss << "</div>\n";
+
+        // Row 2: Attendance Progression Trend Chart
+        if (!data.timelineLabels.empty() && !data.timelineAverages.empty()) {
+            ss << "<div class=\"chart-card\" style=\"margin-bottom:28px;\">\n";
+            ss << "  <div class=\"chart-header\">\n";
+            ss << "    <div>\n";
+            ss << "      <h3 class=\"chart-title\">Semester Session Progression & Engagement Velocity</h3>\n";
+            ss << "      <p class=\"chart-subtitle\">Temporal tracking of attendance average across lecture blocks</p>\n";
+            ss << "    </div>\n";
+            ss << "  </div>\n";
+            ss << "  <div class=\"chart-container\">\n";
+            ss << SvgCharts::renderAttendanceTrendChart(data.timelineLabels, data.timelineAverages, threshold, 820, 220);
+            ss << "  </div>\n";
+            ss << "</div>\n";
+        }
+
+        // Section 1: Detailed Subject-Wise Analytics Table
+        ss << "<div class=\"card-table-wrapper\">\n";
+        ss << "  <div class=\"card-header-toolbar\">\n";
+        ss << "    <div>\n";
+        ss << "      <h3 class=\"table-title\">Subject Performance Matrix & Risk Exposure</h3>\n";
+        ss << "      <p style=\"font-size:0.8rem; color:#64748b; margin-top:2px;\">Granular attendance statistics, student counts, and deficit exposure per course</p>\n";
+        ss << "    </div>\n";
+        ss << "  </div>\n";
+        ss << "  <table class=\"data-table\">\n";
+        ss << "    <thead>\n";
+        ss << "      <tr>\n";
+        ss << "        <th>Course Code</th>\n";
+        ss << "        <th>Subject Title</th>\n";
+        ss << "        <th>Instructor</th>\n";
+        ss << "        <th>Enrollments</th>\n";
+        ss << "        <th>Sessions</th>\n";
+        ss << "        <th>Average Attendance</th>\n";
+        ss << "        <th>At-Risk in Subject</th>\n";
+        ss << "        <th>Course Health</th>\n";
+        ss << "      </tr>\n";
+        ss << "    </thead>\n";
+        ss << "    <tbody>\n";
+
+        for (const auto& sub : data.subjects) {
+            double sumSubPct = 0.0;
+            int subStudentCount = 0;
+            int subAtRiskCount = 0;
+            for (const auto& p : data.profiles) {
+                auto it = p.subjectWise.find(sub.id);
+                if (it != p.subjectWise.end()) {
+                    sumSubPct += it->second.percentage;
+                    subStudentCount++;
+                    if (it->second.percentage < threshold) {
+                        subAtRiskCount++;
+                    }
+                }
+            }
+            double subAvg = (subStudentCount > 0) ? (sumSubPct / subStudentCount) : 0.0;
+
+            ss << "      <tr>\n";
+            ss << "        <td><span style=\"font-family:monospace; font-weight:700; color:#2563eb; background:#eff6ff; padding:3px 8px; border-radius:4px;\">" 
+               << LayoutView::escapeHtml(sub.code) << "</span></td>\n";
+            ss << "        <td><strong>" << LayoutView::escapeHtml(sub.name) << "</strong></td>\n";
+            ss << "        <td>" << LayoutView::escapeHtml(sub.facultyName.empty() ? "Unassigned" : sub.facultyName) << "</td>\n";
+            ss << "        <td>" << subStudentCount << " students</td>\n";
+            ss << "        <td>" << sub.totalSessions << " sessions</td>\n";
+            ss << "        <td>\n";
+            ss << "          <div style=\"display:flex; align-items:center; gap:8px;\">\n";
+            ss << "            <span style=\"font-weight:700; min-width:48px; color:" << (subAvg >= threshold ? "#10b981" : "#ef4444") << ";\">"
+               << std::fixed << std::setprecision(1) << subAvg << "%</span>\n";
+            ss << "            <div style=\"flex:1; max-width:80px; height:6px; background:#e2e8f0; border-radius:3px; overflow:hidden;\">\n";
+            ss << "              <div style=\"height:100%; width:" << std::min(100.0, subAvg) << "%; background:" << (subAvg >= threshold ? "#10b981" : "#ef4444") << ";\"></div>\n";
+            ss << "            </div>\n";
+            ss << "          </div>\n";
+            ss << "        </td>\n";
+            ss << "        <td>\n";
+            if (subAtRiskCount > 0) {
+                ss << "          <span style=\"color:#ef4444; font-weight:600;\">" << subAtRiskCount << " students</span>\n";
+            } else {
+                ss << "          <span style=\"color:#10b981;\">0 students</span>\n";
+            }
+            ss << "        </td>\n";
+            ss << "        <td>\n";
+            if (subAvg >= threshold) {
+                ss << "          <span class=\"badge badge-present\">Optimal</span>\n";
+            } else if (subAvg >= threshold - 10.0) {
+                ss << "          <span class=\"badge badge-medium\">Warning</span>\n";
+            } else {
+                ss << "          <span class=\"badge badge-critical\">Deficit</span>\n";
+            }
+            ss << "        </td>\n";
+            ss << "      </tr>\n";
+        }
+
+        ss << "    </tbody>\n";
+        ss << "  </table>\n";
+        ss << "</div>\n";
+
+        // Section 2: Department-wise Breakdown & Risk Stratification
+        std::unordered_map<std::string, std::vector<attendance::models::StudentAttendanceProfile>> deptMap;
+        for (const auto& p : data.profiles) {
+            std::string d = p.department.empty() ? "General Academic" : p.department;
+            deptMap[d].push_back(p);
+        }
+
+        ss << "<div class=\"card-table-wrapper\">\n";
+        ss << "  <div class=\"card-header-toolbar\">\n";
+        ss << "    <div>\n";
+        ss << "      <h3 class=\"table-title\">Departmental Engagement & Cohort Risk Clustering</h3>\n";
+        ss << "      <p style=\"font-size:0.8rem; color:#64748b; margin-top:2px;\">Aggregated attendance and shortage exposure segmented by academic division</p>\n";
+        ss << "    </div>\n";
+        ss << "  </div>\n";
+        ss << "  <table class=\"data-table\">\n";
+        ss << "    <thead>\n";
+        ss << "      <tr>\n";
+        ss << "        <th>Department</th>\n";
+        ss << "        <th>Cohort Size</th>\n";
+        ss << "        <th>Department Average</th>\n";
+        ss << "        <th>Below Threshold</th>\n";
+        ss << "        <th>Critical Risk</th>\n";
+        ss << "        <th>High Risk</th>\n";
+        ss << "        <th>Safe Standing</th>\n";
+        ss << "      </tr>\n";
+        ss << "    </thead>\n";
+        ss << "    <tbody>\n";
+
+        for (const auto& [dept, pList] : deptMap) {
+            double sumDeptPct = 0.0;
+            int deptDeficit = 0;
+            int deptCrit = 0, deptHigh = 0, deptLow = 0;
+            for (const auto& p : pList) {
+                sumDeptPct += p.overallPercentage;
+                if (p.overallPercentage < threshold) deptDeficit++;
+                if (p.riskCategory == "CRITICAL") deptCrit++;
+                else if (p.riskCategory == "HIGH") deptHigh++;
+                else deptLow++;
+            }
+            double deptAvg = pList.empty() ? 0.0 : (sumDeptPct / pList.size());
+
+            ss << "      <tr>\n";
+            ss << "        <td><strong>" << LayoutView::escapeHtml(dept) << "</strong></td>\n";
+            ss << "        <td>" << pList.size() << " students</td>\n";
+            ss << "        <td><strong style=\"color:" << (deptAvg >= threshold ? "#10b981" : "#ef4444") << ";\">" 
+               << std::fixed << std::setprecision(1) << deptAvg << "%</strong></td>\n";
+            ss << "        <td><span style=\"color:#ef4444; font-weight:600;\">" << deptDeficit << " students</span></td>\n";
+            ss << "        <td>" << (deptCrit > 0 ? "<span class=\"badge badge-critical\">" + std::to_string(deptCrit) + " Critical</span>" : "<span style=\"color:#64748b;\">0</span>") << "</td>\n";
+            ss << "        <td>" << (deptHigh > 0 ? "<span class=\"badge badge-high\">" + std::to_string(deptHigh) + " High</span>" : "<span style=\"color:#64748b;\">0</span>") << "</td>\n";
+            ss << "        <td><span class=\"badge badge-present\">" << deptLow << " Safe</span></td>\n";
+            ss << "      </tr>\n";
+        }
+
+        ss << "    </tbody>\n";
+        ss << "  </table>\n";
+        ss << "</div>\n";
+
+        // Section 3: Risk Tier Stratification Explainer Cards
+        ss << "<div style=\"display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:18px; margin-bottom:28px;\">\n";
+        
+        // Critical
+        ss << "  <div style=\"padding:18px; background:#fff; border-left:4px solid #ef4444; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.06);\">\n";
+        ss << "    <div style=\"display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;\">\n";
+        ss << "      <strong style=\"color:#ef4444; font-size:0.95rem;\">Critical Risk Tier</strong>\n";
+        ss << "      <span class=\"badge badge-critical\">" << data.criticalRiskCount << " Students</span>\n";
+        ss << "    </div>\n";
+        ss << "    <p style=\"font-size:0.8rem; color:#64748b; line-height:1.4;\">Risk score &ge; 0.70. Chronic absenteeism with 3+ consecutive missed sessions. Ineligible for semester examinations without immediate administrative override.</p>\n";
+        ss << "  </div>\n";
+
+        // High
+        ss << "  <div style=\"padding:18px; background:#fff; border-left:4px solid #f97316; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.06);\">\n";
+        ss << "    <div style=\"display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;\">\n";
+        ss << "      <strong style=\"color:#f97316; font-size:0.95rem;\">High Risk Tier</strong>\n";
+        ss << "      <span class=\"badge badge-high\">" << data.highRiskCount << " Students</span>\n";
+        ss << "    </div>\n";
+        ss << "    <p style=\"font-size:0.8rem; color:#64748b; line-height:1.4;\">Risk score 0.50 &ndash; 0.69. Attendance trending downward via linear regression. Requires faculty advisor consultation and targeted remediation.</p>\n";
+        ss << "  </div>\n";
+
+        // Medium
+        ss << "  <div style=\"padding:18px; background:#fff; border-left:4px solid #eab308; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.06);\">\n";
+        ss << "    <div style=\"display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;\">\n";
+        ss << "      <strong style=\"color:#ca8a04; font-size:0.95rem;\">Medium Risk Tier</strong>\n";
+        ss << "      <span class=\"badge badge-medium\">" << data.mediumRiskCount << " Students</span>\n";
+        ss << "    </div>\n";
+        ss << "    <p style=\"font-size:0.8rem; color:#64748b; line-height:1.4;\">Risk score 0.30 &ndash; 0.49. Borderline standing within 2 misses of deficit threshold. Active attendance monitoring enabled.</p>\n";
+        ss << "  </div>\n";
+
+        // Low
+        ss << "  <div style=\"padding:18px; background:#fff; border-left:4px solid #10b981; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.06);\">\n";
+        ss << "    <div style=\"display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;\">\n";
+        ss << "      <strong style=\"color:#10b981; font-size:0.95rem;\">Safe Standing Tier</strong>\n";
+        ss << "      <span class=\"badge badge-low\">" << data.lowRiskCount << " Students</span>\n";
+        ss << "    </div>\n";
+        ss << "    <p style=\"font-size:0.8rem; color:#64748b; line-height:1.4;\">Risk score &lt; 0.30. Consistently above institutional minimums with robust presence across all enrolled subjects.</p>\n";
+        ss << "  </div>\n";
+
         ss << "</div>\n";
 
         return LayoutView::renderLayout(ctx, ss.str());

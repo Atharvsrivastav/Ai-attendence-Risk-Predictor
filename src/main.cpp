@@ -471,7 +471,45 @@ int main(int argc, char* argv[]) {
         if (!sess.has_value()) return makeRedirect("/login");
         if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1 style='color:#b91c1c; font-family:sans-serif;'>403 Forbidden: Administrative Privileges Required</h1>");
 
-        return makeRedirect("/admin");
+        double threshold = repo.getAttendanceThreshold();
+        auto allProfiles = service.getAllStudentProfiles(threshold);
+        auto analytics = service.getClassAnalytics(threshold);
+        auto allSubjects = repo.findAllSubjects();
+
+        attendance::views::AdminAnalyticsData data;
+        data.totalStudents = analytics.value("totalStudents", 0);
+        data.totalFaculty = static_cast<int>(repo.findAllFaculty().size());
+        data.totalSubjects = static_cast<int>(allSubjects.size());
+        data.averageAttendance = analytics.value("averageAttendance", 0.0);
+        data.belowThresholdCount = analytics.value("belowThresholdCount", 0);
+        
+        auto dist = analytics["riskDistribution"];
+        data.lowRiskCount = dist.value("low", 0);
+        data.mediumRiskCount = dist.value("medium", 0);
+        data.highRiskCount = dist.value("high", 0);
+        data.criticalRiskCount = dist.value("critical", 0);
+
+        for (const auto& p : allProfiles.profiles) {
+            data.totalSessions += p.totalSessionsConducted;
+        }
+
+        for (const auto& sb : analytics["subjectBreakdown"]) {
+            data.subjectCodes.push_back(sb.value("subjectCode", ""));
+            data.subjectAverages.push_back(sb.value("averageAttendance", 0.0));
+        }
+
+        auto timelineKey = analytics.contains("sessionTimeline") ? "sessionTimeline" : "timeline";
+        for (const auto& t : analytics[timelineKey]) {
+            data.timelineLabels.push_back(t.value("session", ""));
+            data.timelineAverages.push_back(t.value("avg", 0.0));
+        }
+
+        data.profiles = allProfiles.profiles;
+        data.subjects = allSubjects;
+        data.alerts = analytics.value("recentAlerts", nlohmann::json::array());
+
+        auto ctx = buildPageContext(sess, "admin-analytics", "Institutional Deep Analytics", {{"Deep Analytics", ""}});
+        return makeHtmlResponse(200, attendance::views::AdminViews::renderDeepAnalytics(data, ctx, threshold));
     });
 
     CROW_ROUTE(app, "/admin/students")

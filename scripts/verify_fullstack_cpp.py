@@ -100,6 +100,11 @@ try:
         subjects_html = res.read().decode("utf-8")
         check("Admin Course Subjects Catalog Rendered", res.status == 200 and "Course Curriculum & Subjects" in subjects_html and "Institutional Subject Catalog" in subjects_html)
 
+    with opener.open(f"{BASE_URL}/admin/analytics") as res:
+        analytics_html = res.read().decode("utf-8")
+        check("Admin Deep Analytics Page Rendered", res.status == 200 and "Institutional Deep Analytics" in analytics_html and "Subject Performance Matrix" in analytics_html)
+        check("Admin Deep Analytics Has Progression Chart", "<svg" in analytics_html and "Semester Session Progression" in analytics_html)
+
     with opener.open(f"{BASE_URL}/admin/system") as res:
         system_html = res.read().decode("utf-8")
         check("Admin System Settings Rendered", "System Health" in system_html and "Audit" in system_html)

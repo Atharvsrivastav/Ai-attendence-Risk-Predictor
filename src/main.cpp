@@ -469,7 +469,7 @@ int main(int argc, char* argv[]) {
     ([&](const crow::request& req) {
         auto sess = resolveSession(req, repo);
         if (!sess.has_value()) return makeRedirect("/login");
-        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeRedirect("/");
+        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1 style='color:#b91c1c; font-family:sans-serif;'>403 Forbidden: Administrative Privileges Required</h1>");
 
         return makeRedirect("/admin");
     });
@@ -478,7 +478,7 @@ int main(int argc, char* argv[]) {
     ([&](const crow::request& req) {
         auto sess = resolveSession(req, repo);
         if (!sess.has_value()) return makeRedirect("/login");
-        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1>403 Forbidden: Administrative Privileges Required</h1>");
+        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1 style='color:#b91c1c; font-family:sans-serif;'>403 Forbidden: Administrative Privileges Required</h1>");
 
         double threshold = repo.getAttendanceThreshold();
         std::string query = req.url_params.get("q") ? req.url_params.get("q") : "";
@@ -513,7 +513,7 @@ int main(int argc, char* argv[]) {
     ([&](const crow::request& req) {
         auto sess = resolveSession(req, repo);
         if (!sess.has_value()) return makeRedirect("/login");
-        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1>403 Forbidden: Administrative Privileges Required</h1>");
+        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1 style='color:#b91c1c; font-family:sans-serif;'>403 Forbidden: Administrative Privileges Required</h1>");
 
         auto ctx = buildPageContext(sess, "admin-students", "Add Student", {{"Students", "/admin/students"}, {"Add New", ""}});
         return makeHtmlResponse(200, attendance::views::AdminViews::renderAddStudentForm("", "", ctx));
@@ -524,7 +524,7 @@ int main(int argc, char* argv[]) {
     ([&](const crow::request& req) {
         auto sess = resolveSession(req, repo);
         if (!sess.has_value()) return makeRedirect("/login");
-        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1>403 Forbidden: Administrative Privileges Required</h1>");
+        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1 style='color:#b91c1c; font-family:sans-serif;'>403 Forbidden: Administrative Privileges Required</h1>");
 
         auto formData = parseFormData(req.body);
         std::string name = formData["name"];
@@ -571,7 +571,7 @@ int main(int argc, char* argv[]) {
     ([&](const crow::request& req, std::string studentId) {
         auto sess = resolveSession(req, repo);
         if (!sess.has_value()) return makeRedirect("/login");
-        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1>403 Forbidden: Administrative Privileges Required</h1>");
+        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1 style='color:#b91c1c; font-family:sans-serif;'>403 Forbidden: Administrative Privileges Required</h1>");
 
         double threshold = repo.getAttendanceThreshold();
         auto profOpt = service.getStudentProfile(studentId, threshold);
@@ -584,11 +584,36 @@ int main(int argc, char* argv[]) {
         return makeHtmlResponse(200, attendance::views::StudentViews::renderStudentDashboard(*profOpt, history, nullptr, 5, 0, ctx, threshold));
     });
 
+    CROW_ROUTE(app, "/admin/faculty")
+    ([&](const crow::request& req) {
+        auto sess = resolveSession(req, repo);
+        if (!sess.has_value()) return makeRedirect("/login");
+        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1 style='color:#b91c1c; font-family:sans-serif;'>403 Forbidden: Administrative Privileges Required</h1>");
+
+        auto facultyList = repo.findAllFaculty();
+        auto subjectList = repo.findAllSubjects();
+
+        auto ctx = buildPageContext(sess, "admin-faculty", "Faculty Staff Directory", {{"Faculty Staff", ""}});
+        return makeHtmlResponse(200, attendance::views::AdminViews::renderFacultyList(facultyList, subjectList, ctx));
+    });
+
+    CROW_ROUTE(app, "/admin/subjects")
+    ([&](const crow::request& req) {
+        auto sess = resolveSession(req, repo);
+        if (!sess.has_value()) return makeRedirect("/login");
+        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1 style='color:#b91c1c; font-family:sans-serif;'>403 Forbidden: Administrative Privileges Required</h1>");
+
+        auto subjectList = repo.findAllSubjects();
+
+        auto ctx = buildPageContext(sess, "admin-subjects", "Course Curriculum & Subjects", {{"Course Subjects", ""}});
+        return makeHtmlResponse(200, attendance::views::AdminViews::renderSubjectList(subjectList, ctx));
+    });
+
     CROW_ROUTE(app, "/admin/system")
     ([&](const crow::request& req) {
         auto sess = resolveSession(req, repo);
         if (!sess.has_value()) return makeRedirect("/login");
-        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1>403 Forbidden: Administrative Privileges Required</h1>");
+        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1 style='color:#b91c1c; font-family:sans-serif;'>403 Forbidden: Administrative Privileges Required</h1>");
 
         double threshold = repo.getAttendanceThreshold();
         auto auditLogs = repo.findRecentAuditLogs(50);
@@ -596,28 +621,12 @@ int main(int argc, char* argv[]) {
         return makeHtmlResponse(200, attendance::views::AdminViews::renderSystemConfig(threshold, auditLogs, ctx));
     });
 
-    CROW_ROUTE(app, "/admin/system")
-        .methods("POST"_method)
-    ([&](const crow::request& req) {
-        auto sess = resolveSession(req, repo);
-        if (!sess.has_value()) return makeRedirect("/login");
-        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1>403 Forbidden</h1>");
-
-        auto formData = parseFormData(req.body);
-        if (formData.find("threshold") != formData.end() && !formData["threshold"].empty()) {
-            double threshold = std::stod(formData["threshold"]);
-            repo.setAttendanceThreshold(threshold);
-            repo.logAudit(sess->userId, sess->userEmail, "UPDATE_THRESHOLD", "SYSTEM", "THRESHOLD", "Updated to " + std::to_string(threshold) + "%", req.remote_ip_address);
-        }
-        return makeRedirect("/admin/system");
-    });
-
     CROW_ROUTE(app, "/admin/system/threshold")
         .methods("POST"_method)
     ([&](const crow::request& req) {
         auto sess = resolveSession(req, repo);
         if (!sess.has_value()) return makeRedirect("/login");
-        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1>403 Forbidden</h1>");
+        if (sess->userRole != attendance::models::UserRole::ADMIN) return makeHtmlResponse(403, "<h1 style='color:#b91c1c; font-family:sans-serif;'>403 Forbidden: Administrative Privileges Required</h1>");
 
         auto formData = parseFormData(req.body);
         double threshold = std::stod(formData["threshold"]);

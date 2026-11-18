@@ -848,8 +848,8 @@ bool AttendanceRepository::createUserSession(const attendance::models::UserSessi
     stmt->bind(1, s.id);
     stmt->bind(2, s.tokenHash);
     stmt->bind(3, s.userId);
-    stmt->bind(4, static_cast<int64_t>(s.createdAt));
-    stmt->bind(5, static_cast<int64_t>(s.expiresAt));
+    stmt->bind(4, static_cast<long long>(s.createdAt));
+    stmt->bind(5, static_cast<long long>(s.expiresAt));
     stmt->bind(6, s.userAgent);
     stmt->bind(7, s.ipAddress);
     return stmt->execute();
@@ -909,7 +909,7 @@ int AttendanceRepository::cleanExpiredSessions() {
     ).count();
     auto stmt = db_.prepare("DELETE FROM user_sessions WHERE expires_at < ? OR is_revoked = 1;");
     if (!stmt) return 0;
-    stmt->bind(1, static_cast<int64_t>(now));
+    stmt->bind(1, static_cast<long long>(now));
     stmt->execute();
     return 1;
 }

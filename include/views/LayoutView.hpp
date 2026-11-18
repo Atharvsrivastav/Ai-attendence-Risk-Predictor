@@ -80,10 +80,14 @@ public:
         const std::string& value,
         const std::string& subtext,
         const std::string& iconColor = "#2563eb",
-        const std::string& sparklineSvg = "") 
+        const std::string& sparklineSvg = "",
+        const std::string& href = "") 
     {
         std::stringstream ss;
-        ss << "<div class=\"stat-card\">";
+        if (!href.empty()) {
+            ss << "<a href=\"" << escapeHtml(href) << "\" style=\"text-decoration:none; color:inherit; display:block;\">";
+        }
+        ss << "<div class=\"stat-card\"" << (!href.empty() ? " style=\"cursor:pointer; transition:transform 0.15s ease, box-shadow 0.15s ease;\" onmouseover=\"this.style.transform='translateY(-2px)'\" onmouseout=\"this.style.transform='none'\"" : "") << ">";
         ss << "<div class=\"stat-header\">";
         ss << "<span class=\"stat-title\">" << escapeHtml(title) << "</span>";
         if (!sparklineSvg.empty()) {
@@ -100,6 +104,9 @@ public:
             ss << "<div class=\"stat-subtext\">" << escapeHtml(subtext) << "</div>";
         }
         ss << "</div>";
+        if (!href.empty()) {
+            ss << "</a>";
+        }
         return ss.str();
     }
 

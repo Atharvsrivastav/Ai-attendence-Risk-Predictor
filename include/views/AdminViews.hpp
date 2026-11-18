@@ -4,6 +4,7 @@
 #include <vector>
 #include <sstream>
 #include <iomanip>
+#include <unordered_set>
 #include "models/Models.hpp"
 #include "views/LayoutView.hpp"
 #include "views/SvgCharts.hpp"
@@ -49,16 +50,16 @@ public:
 
         // Top 6 Metrics Grid
         ss << "<div class=\"metrics-grid\">\n";
-        ss << LayoutView::renderStatCard("Total Students", std::to_string(data.totalStudents), "Active enrollment", "#2563eb");
-        ss << LayoutView::renderStatCard("Faculty Staff", std::to_string(data.totalFaculty), "Teaching professors", "#10b981");
-        ss << LayoutView::renderStatCard("Course Subjects", std::to_string(data.totalSubjects), "Active curriculum", "#8b5cf6");
+        ss << LayoutView::renderStatCard("Total Students", std::to_string(data.totalStudents), "Active enrollment", "#2563eb", "", "/admin/students");
+        ss << LayoutView::renderStatCard("Faculty Staff", std::to_string(data.totalFaculty), "Teaching professors", "#10b981", "", "/admin/faculty");
+        ss << LayoutView::renderStatCard("Course Subjects", std::to_string(data.totalSubjects), "Active curriculum", "#8b5cf6", "", "/admin/subjects");
         ss << LayoutView::renderStatCard("Sessions Held", std::to_string(data.totalSessions), "Conducted lectures", "#06b6d4");
         
         std::stringstream ssAvg;
         ssAvg << std::fixed << std::setprecision(1) << data.averageAttendance << "%";
-        ss << LayoutView::renderStatCard("Institution Average", ssAvg.str(), "Across all courses", (data.averageAttendance >= threshold ? "#10b981" : "#f59e0b"));
+        ss << LayoutView::renderStatCard("Institution Average", ssAvg.str(), "Across all courses", (data.averageAttendance >= threshold ? "#10b981" : "#f59e0b"), "", "/admin/analytics");
 
-        ss << LayoutView::renderStatCard("Shortage Deficit", std::to_string(data.belowThresholdCount), "Students below " + std::to_string(static_cast<int>(threshold)) + "%", "#ef4444");
+        ss << LayoutView::renderStatCard("Shortage Deficit", std::to_string(data.belowThresholdCount), "Students below " + std::to_string(static_cast<int>(threshold)) + "%", "#ef4444", "", "/reports");
         ss << "</div>\n";
 
         // Charts Grid: Subject-wise Bar Chart + Risk Donut Chart
@@ -364,6 +365,217 @@ public:
                 ss << "        <td>" << LayoutView::escapeHtml(log.entityType) << "</td>\n";
                 ss << "        <td style=\"font-size:0.82rem; color:#475569;\">" << LayoutView::escapeHtml(log.details) << "</td>\n";
                 ss << "        <td style=\"font-size:0.75rem; color:#94a3b8;\">" << LayoutView::escapeHtml(log.ipAddress) << "</td>\n";
+                ss << "      </tr>\n";
+            }
+        }
+
+        ss << "    </tbody>\n";
+        ss << "  </table>\n";
+        ss << "</div>\n";
+
+        return LayoutView::renderLayout(ctx, ss.str());
+    }
+
+    // Faculty Staff Directory View
+    static std::string renderFacultyList(
+        const std::vector<attendance::models::Faculty>& facultyList,
+        const std::vector<attendance::models::Subject>& subjectList,
+        const PageContext& ctx) 
+    {
+        std::stringstream ss;
+
+        ss << "<div class=\"page-header\">\n";
+        ss << "  <div>\n";
+        ss << "    <h1 class=\"page-title\">Faculty Staff Directory</h1>\n";
+        ss << "    <p class=\"page-subtitle\">Institutional teaching faculty, department appointments, and course workload assignments.</p>\n";
+        ss << "  </div>\n";
+        ss << "  <div style=\"display:flex; gap:10px;\">\n";
+        ss << "    <a href=\"/admin/subjects\" class=\"btn btn-secondary\">View Courses &rarr;</a>\n";
+        ss << "    <a href=\"/admin/students\" class=\"btn btn-secondary\">Student Directory &rarr;</a>\n";
+        ss << "  </div>\n";
+        ss << "</div>\n";
+
+        // Summary Stats Grid
+        std::unordered_set<std::string> depts;
+        for (const auto& f : facultyList) {
+            if (!f.department.empty()) depts.insert(f.department);
+        }
+        int totalTeachingSessions = 0;
+        for (const auto& s : subjectList) {
+            totalTeachingSessions += s.totalSessions;
+        }
+
+        ss << "<div class=\"metrics-grid\">\n";
+        ss << LayoutView::renderStatCard("Faculty Members", std::to_string(facultyList.size()), "Active academic staff", "#10b981");
+        ss << LayoutView::renderStatCard("Departments", std::to_string(depts.empty() ? 1 : depts.size()), "Academic divisions", "#6366f1");
+        ss << LayoutView::renderStatCard("Course Allocations", std::to_string(subjectList.size()), "Assigned subject modules", "#8b5cf6", "", "/admin/subjects");
+        ss << LayoutView::renderStatCard("Lectures Delivered", std::to_string(totalTeachingSessions), "Conducted sessions", "#06b6d4");
+        ss << "</div>\n";
+
+        // Faculty Directory Table Card
+        ss << "<div class=\"card-table-wrapper\">\n";
+        ss << "  <div class=\"card-header-toolbar\">\n";
+        ss << "    <div>\n";
+        ss << "      <h3 class=\"table-title\">Institutional Faculty Roster</h3>\n";
+        ss << "      <p style=\"font-size:0.8rem; color:#64748b; margin-top:2px;\">Showing " << facultyList.size() << " registered faculty instructors</p>\n";
+        ss << "    </div>\n";
+        ss << "  </div>\n";
+
+        ss << "  <table class=\"data-table\">\n";
+        ss << "    <thead>\n";
+        ss << "      <tr>\n";
+        ss << "        <th>Faculty Member</th>\n";
+        ss << "        <th>Employee / Faculty ID</th>\n";
+        ss << "        <th>Department</th>\n";
+        ss << "        <th>Assigned Courses</th>\n";
+        ss << "        <th>Workload</th>\n";
+        ss << "        <th>Status</th>\n";
+        ss << "      </tr>\n";
+        ss << "    </thead>\n";
+        ss << "    <tbody>\n";
+
+        if (facultyList.empty()) {
+            ss << "      <tr><td colspan=\"6\" style=\"text-align:center; padding:32px; color:#94a3b8;\">No faculty members found</td></tr>\n";
+        } else {
+            for (const auto& f : facultyList) {
+                // Find subjects assigned to this faculty
+                std::vector<std::string> assignedCourses;
+                int facultySessions = 0;
+                int facultyStudents = 0;
+                for (const auto& s : subjectList) {
+                    if (s.facultyId == f.id || s.facultyEmail == f.email || s.facultyId == f.userId) {
+                        assignedCourses.push_back(s.code + " (" + s.name + ")");
+                        facultySessions += s.totalSessions;
+                        facultyStudents += s.enrolledStudents;
+                    }
+                }
+
+                std::string initial = f.name.empty() ? "F" : f.name.substr(0, 1);
+
+                ss << "      <tr>\n";
+                ss << "        <td>\n";
+                ss << "          <div style=\"display:flex; align-items:center; gap:10px;\">\n";
+                ss << "            <div style=\"width:32px; height:32px; border-radius:50%; background:#10b98115; color:#10b981; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:0.85rem;\">"
+                   << LayoutView::escapeHtml(initial) << "</div>\n";
+                ss << "            <div>\n";
+                ss << "              <div style=\"font-weight:600; color:#0f172a;\">" << LayoutView::escapeHtml(f.name) << "</div>\n";
+                ss << "              <div style=\"font-size:0.75rem; color:#64748b;\">" << LayoutView::escapeHtml(f.email) << "</div>\n";
+                ss << "            </div>\n";
+                ss << "          </div>\n";
+                ss << "        </td>\n";
+                ss << "        <td><span style=\"font-family:monospace; font-size:0.82rem; background:#f1f5f9; padding:2px 8px; border-radius:4px;\">" 
+                   << LayoutView::escapeHtml(f.employeeId.empty() ? f.id : f.employeeId) << "</span></td>\n";
+                ss << "        <td><span class=\"badge\" style=\"background:#e0e7ff; color:#3730a3;\">" << LayoutView::escapeHtml(f.department.empty() ? "Computer Science" : f.department) << "</span></td>\n";
+                ss << "        <td>\n";
+                if (assignedCourses.empty()) {
+                    ss << "          <span style=\"font-size:0.8rem; color:#94a3b8;\">No current courses</span>\n";
+                } else {
+                    ss << "          <div style=\"display:flex; flex-wrap:wrap; gap:4px;\">\n";
+                    for (const auto& c : assignedCourses) {
+                        ss << "            <span class=\"badge\" style=\"background:#f8fafc; border:1px solid #e2e8f0; color:#334155; font-size:0.75rem;\">" << LayoutView::escapeHtml(c) << "</span>\n";
+                    }
+                    ss << "          </div>\n";
+                }
+                ss << "        </td>\n";
+                ss << "        <td>\n";
+                ss << "          <div style=\"font-size:0.82rem;\"><strong>" << facultySessions << "</strong> sessions</div>\n";
+                ss << "          <div style=\"font-size:0.75rem; color:#64748b;\">" << facultyStudents << " enrolled seats</div>\n";
+                ss << "        </td>\n";
+                ss << "        <td><span class=\"badge badge-present\">Active Faculty</span></td>\n";
+                ss << "      </tr>\n";
+            }
+        }
+
+        ss << "    </tbody>\n";
+        ss << "  </table>\n";
+        ss << "</div>\n";
+
+        return LayoutView::renderLayout(ctx, ss.str());
+    }
+
+    // Course Curriculum & Subjects Catalog View
+    static std::string renderSubjectList(
+        const std::vector<attendance::models::Subject>& subjectList,
+        const PageContext& ctx) 
+    {
+        std::stringstream ss;
+
+        ss << "<div class=\"page-header\">\n";
+        ss << "  <div>\n";
+        ss << "    <h1 class=\"page-title\">Course Curriculum & Subjects</h1>\n";
+        ss << "    <p class=\"page-subtitle\">Academic subject catalog, teaching mentor allocations, credit values, and session attendance tracking.</p>\n";
+        ss << "  </div>\n";
+        ss << "  <div style=\"display:flex; gap:10px;\">\n";
+        ss << "    <a href=\"/admin/faculty\" class=\"btn btn-secondary\">Faculty Staff &rarr;</a>\n";
+        ss << "    <a href=\"/admin/students\" class=\"btn btn-secondary\">Student Directory &rarr;</a>\n";
+        ss << "  </div>\n";
+        ss << "</div>\n";
+
+        int totalEnrolledSeats = 0;
+        int totalLecturesConducted = 0;
+        int totalCredits = 0;
+        for (const auto& sub : subjectList) {
+            totalEnrolledSeats += sub.enrolledStudents;
+            totalLecturesConducted += sub.totalSessions;
+            totalCredits += sub.credits;
+        }
+
+        // Summary Stats Grid
+        ss << "<div class=\"metrics-grid\">\n";
+        ss << LayoutView::renderStatCard("Total Courses", std::to_string(subjectList.size()), "Accredited curriculum", "#8b5cf6");
+        ss << LayoutView::renderStatCard("Enrolled Seats", std::to_string(totalEnrolledSeats), "Course student enrollments", "#2563eb", "", "/admin/students");
+        ss << LayoutView::renderStatCard("Lectures Conducted", std::to_string(totalLecturesConducted), "Total classroom sessions", "#06b6d4");
+        ss << LayoutView::renderStatCard("Curriculum Credits", std::to_string(totalCredits), "Total semester credits", "#10b981");
+        ss << "</div>\n";
+
+        // Subjects Table Card
+        ss << "<div class=\"card-table-wrapper\">\n";
+        ss << "  <div class=\"card-header-toolbar\">\n";
+        ss << "    <div>\n";
+        ss << "      <h3 class=\"table-title\">Institutional Subject Catalog</h3>\n";
+        ss << "      <p style=\"font-size:0.8rem; color:#64748b; margin-top:2px;\">Listing all " << subjectList.size() << " active course subjects</p>\n";
+        ss << "    </div>\n";
+        ss << "  </div>\n";
+
+        ss << "  <table class=\"data-table\">\n";
+        ss << "    <thead>\n";
+        ss << "      <tr>\n";
+        ss << "        <th>Code</th>\n";
+        ss << "        <th>Course Title</th>\n";
+        ss << "        <th>Credits</th>\n";
+        ss << "        <th>Instructor / Faculty Mentor</th>\n";
+        ss << "        <th>Enrollments</th>\n";
+        ss << "        <th>Conducted Sessions</th>\n";
+        ss << "        <th>Curriculum Status</th>\n";
+        ss << "      </tr>\n";
+        ss << "    </thead>\n";
+        ss << "    <tbody>\n";
+
+        if (subjectList.empty()) {
+            ss << "      <tr><td colspan=\"7\" style=\"text-align:center; padding:32px; color:#94a3b8;\">No course subjects found</td></tr>\n";
+        } else {
+            for (const auto& sub : subjectList) {
+                ss << "      <tr>\n";
+                ss << "        <td><span style=\"font-family:monospace; font-weight:700; color:#2563eb; background:#eff6ff; padding:3px 8px; border-radius:4px; border:1px solid #bfdbfe;\">" 
+                   << LayoutView::escapeHtml(sub.code) << "</span></td>\n";
+                ss << "        <td>\n";
+                ss << "          <div style=\"font-weight:600; color:#0f172a;\">" << LayoutView::escapeHtml(sub.name) << "</div>\n";
+                ss << "          <div style=\"font-size:0.75rem; color:#64748b;\">ID: " << LayoutView::escapeHtml(sub.id) << "</div>\n";
+                ss << "        </td>\n";
+                ss << "        <td><span class=\"badge\" style=\"background:#f1f5f9; color:#475569;\">" << sub.credits << " Credits</span></td>\n";
+                ss << "        <td>\n";
+                if (!sub.facultyName.empty() && sub.facultyName != "Unassigned") {
+                    ss << "          <div style=\"font-weight:500; color:#1e293b;\">" << LayoutView::escapeHtml(sub.facultyName) << "</div>\n";
+                    if (!sub.facultyEmail.empty()) {
+                        ss << "          <div style=\"font-size:0.75rem; color:#64748b;\">" << LayoutView::escapeHtml(sub.facultyEmail) << "</div>\n";
+                    }
+                } else {
+                    ss << "          <span class=\"badge badge-absent\">Unassigned</span>\n";
+                }
+                ss << "        </td>\n";
+                ss << "        <td><strong>" << sub.enrolledStudents << "</strong> students</td>\n";
+                ss << "        <td><strong>" << sub.totalSessions << "</strong> sessions</td>\n";
+                ss << "        <td><span class=\"badge badge-present\">Active Course</span></td>\n";
                 ss << "      </tr>\n";
             }
         }

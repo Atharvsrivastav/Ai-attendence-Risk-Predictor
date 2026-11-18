@@ -92,6 +92,14 @@ try:
         roster_html = res.read().decode("utf-8")
         check("Admin Students Directory Rendered", "Student Directory" in roster_html and "<table" in roster_html)
 
+    with opener.open(f"{BASE_URL}/admin/faculty") as res:
+        faculty_html = res.read().decode("utf-8")
+        check("Admin Faculty Staff Directory Rendered", res.status == 200 and "Faculty Staff Directory" in faculty_html and "Institutional Faculty Roster" in faculty_html)
+
+    with opener.open(f"{BASE_URL}/admin/subjects") as res:
+        subjects_html = res.read().decode("utf-8")
+        check("Admin Course Subjects Catalog Rendered", res.status == 200 and "Course Curriculum & Subjects" in subjects_html and "Institutional Subject Catalog" in subjects_html)
+
     with opener.open(f"{BASE_URL}/admin/system") as res:
         system_html = res.read().decode("utf-8")
         check("Admin System Settings Rendered", "System Health" in system_html and "Audit" in system_html)

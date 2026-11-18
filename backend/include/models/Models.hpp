@@ -178,9 +178,13 @@ struct AttendanceRecord {
     std::string createdAt;
     std::string updatedAt;
 
-    // Extra session information for chronological sorting
+    // Extra session information for chronological sorting and detailed history
     std::string sessionDate;
     std::string subjectId;
+    std::string topic;
+    std::string subjectCode;
+    std::string subjectName;
+    std::string facultyName;
 };
 
 struct SubjectAttendance {

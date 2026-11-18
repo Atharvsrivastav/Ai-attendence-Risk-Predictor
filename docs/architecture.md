@@ -114,3 +114,32 @@ The **AI Attendance Risk Predictor** is architected as a high-performance, decou
   - `attendance_records` (individual attendance statuses: PRESENT, LATE, ABSENT, EXCUSED)
   - `undo_records` (persistent undo journal for revert operations)
   - `alert_queue_items` (persistent alert log for automated risk notifications)
+
+---
+
+## 4. Security Architecture & Cryptographic Core
+
+### A. Password Security (Bcrypt Blowfish)
+- Stored using production-grade Bcrypt hashes (`$2a$10$...`) powered by Solar Designer's public domain `crypt_blowfish`.
+- Direct Bcrypt string comparison protects against foreign password substitution and password bypasses.
+- No plaintext fallback passwords or insecure shortcuts.
+
+### B. Cryptographically Signed JWT Tokens (HS256)
+- Signed using genuine RFC 2104 HMAC-SHA256 (`backend/third_party/sha256.c`).
+- Tokens contain `userId`, `email`, `role`, `studentId`, `facultyId`, `issuedAt`, and `expiresAt` (`exp = 7 days`).
+- The server recalculates and verifies the HMAC-SHA256 signature on every authenticated request before inspecting claims.
+- Forged, tampered, expired, or malformed tokens are rejected immediately with HTTP 401 Unauthorized.
+- Secret key is read from `JWT_SECRET` environment variable with fail-safe fallback for local development.
+
+### C. Role-Based Access Control (RBAC) & Data Privacy
+- **ADMIN**: Can manage institution-wide data, view all students, faculty, subjects, and analytics.
+- **FACULTY**: Can conduct roll calls, correct attendance, undo recent submissions, and inspect assigned student profiles.
+- **STUDENT**: Privacy-restricted role. Students can only view their own attendance records (`/api/attendance/{studentId}`), their own profile (`/api/students/{id}`), and their own risk prediction. Accessing peer records returns HTTP 403 Forbidden. Students are prohibited from creating users or mutating attendance.
+
+---
+
+## 5. Transaction Safety & RAII ScopedTransaction
+- All database state transitions (roll call submissions, status corrections, and undo operations) are wrapped in `attendance::db::Database::ScopedTransaction`.
+- If an exception or database error occurs mid-operation, `ScopedTransaction` automatically triggers `ROLLBACK` in its destructor, preserving SQLite data consistency.
+- SQLite is configured with `PRAGMA foreign_keys = ON;` and `PRAGMA journal_mode = WAL;` for concurrent read/write transactions.
+- Exact previous statuses are stored in `undo_records` (e.g., LATE -> EXCUSED, PRESENT -> ABSENT) allowing multi-step, bidirectional undo operations that survive process restarts.

@@ -183,6 +183,30 @@ public:
     const std::unordered_map<std::string, GraphNode>& getNodes() const { return nodes_; }
     const std::vector<GraphEdge>& getEdges() const { return edges_; }
 
+    nlohmann::json toJson() const {
+        nlohmann::json nodesArr = nlohmann::json::array();
+        for (const auto& [id, node] : nodes_) {
+            nodesArr.push_back({
+                {"id", node.id},
+                {"label", node.label},
+                {"type", node.type},
+                {"metadata", node.metadata}
+            });
+        }
+        nlohmann::json edgesArr = nlohmann::json::array();
+        for (const auto& edge : edges_) {
+            edgesArr.push_back({
+                {"source", edge.source},
+                {"target", edge.target},
+                {"relationship", edge.relationship}
+            });
+        }
+        return {
+            {"nodes", nodesArr},
+            {"edges", edgesArr}
+        };
+    }
+
 private:
     void dfsRecursive(const std::string& node, std::unordered_set<std::string>& visited, std::vector<std::string>& order) const {
         visited.insert(node);

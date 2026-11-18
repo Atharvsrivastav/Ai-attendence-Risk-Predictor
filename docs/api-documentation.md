@@ -1,6 +1,32 @@
-# REST API Documentation
+# REST API Documentation & Master Contract
 
 The C++ backend server listens on `http://127.0.0.1:8080`. When accessed through the Next.js frontend proxy, all endpoints are accessible under `http://localhost:3000/api/*`.
+
+---
+
+## Complete API Contract Table
+
+| Feature | HTTP Method | Endpoint | Request Body / Params | Response Summary | Authorization |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Health Check** | `GET` | `/health` | None | `{ "status": "healthy", ... }` | Public |
+| **Authentication** | `POST` | `/api/auth/login` | `{ email, password }` | `{ success, token, user }` | Public |
+| **Authentication** | `POST` | `/api/auth/logout` | None | `{ success, message }` | Public |
+| **Authentication** | `GET` | `/api/auth/me` | Bearer Token / Cookie | `{ authenticated, user }` | Authenticated |
+| **Analytics** | `GET` | `/api/analytics` | `?threshold=75.0` | `{ totalStudents, averageAttendance, riskDistribution, ... }` | Public / Dashboard |
+| **Subjects** | `GET` | `/api/subjects` | None | `{ subjects: [...] }` | Public / Dashboard |
+| **Subjects** | `POST` | `/api/subjects` | `{ code, name, credits, facultyId }` | `{ success, subject }` | Admin Only |
+| **Students** | `GET` | `/api/students` | `?threshold=75&subjectId=&risk=&search=&sortBy=&sortOrder=` | `{ total, students: [...] }` | Admin or Faculty |
+| **Students** | `POST` | `/api/students` | `{ name, email, rollNumber, department, semester }` | `{ success, student }` | Admin or Faculty |
+| **Student Profile** | `GET` | `/api/students/{id}` | `?threshold=75.0` | `{ profile: { ... } }` | Admin, Faculty, or Student (Self Only) |
+| **Student Attendance** | `GET` | `/api/attendance/{studentId}` | None | `{ records: [...], count }` | Admin, Faculty, or Student (Self Only) |
+| **Attendance Roll Call** | `POST` | `/api/attendance` | `{ subjectId, records: [{ studentId, status, remarks }] }` | `{ success, sessionId, recordsCount, undoStackDepth }` | Admin or Faculty |
+| **Attendance Correction** | `PATCH` | `/api/attendance` | `{ recordId, newStatus, reason }` | `{ success, recordId, previousStatus, newStatus }` | Admin or Faculty |
+| **Attendance Undo** | `POST` | `/api/attendance/undo` | None | `{ success, message, undoneAction, remainingStackDepth }` | Admin or Faculty |
+| **Attendance Undo History** | `GET` | `/api/attendance/undo` | None | `{ undoStackSize, history: [...] }` | Admin or Faculty |
+| **Risk Prediction** | `GET` | `/api/risk/{studentId}` | `?threshold=75.0` | `{ studentId, prediction: { category, score, confidence, methodology, ... } }` | Admin, Faculty, or Student (Self Only) |
+| **What-If Simulation** | `POST` | `/api/prediction` | `{ studentId, attendNext, missNext, threshold }` | `{ current, simulation, projectedRisk }` | Admin, Faculty, or Student (Self Only) |
+| **DSA Benchmarks** | `GET` | `/api/dsa/benchmark` | None | `{ datasetSize, sorting: { mergeSort, quickSort }, searching, lookupBenchmark }` | Public / Lab |
+| **DSA Graph Traversal** | `GET` | `/api/dsa/graph` | `?start=FACULTY_id` | `{ startNode, graph: { nodes, edges }, traversals: { bfs, dfs } }` | Public / Lab |
 
 ---
 

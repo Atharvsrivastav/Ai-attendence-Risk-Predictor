@@ -1,4 +1,3 @@
-#pragma once
 #include <iostream>
 #include <string>
 #include <vector>
@@ -41,24 +40,66 @@ static std::string extractToken(const crow::request& req) {
     return "";
 }
 
+// Authenticate caller
+static std::optional<attendance::auth::SessionClaims> authenticateRequest(const crow::request& req) {
+    std::string token = extractToken(req);
+    if (token.empty()) return std::nullopt;
+    return attendance::auth::AuthService::verifyToken(token);
+}
+
+// Role-based authorization checker
+static bool checkRole(const std::optional<attendance::auth::SessionClaims>& claims,
+                      const std::vector<attendance::models::UserRole>& allowedRoles) 
+{
+    if (!claims.has_value()) return false;
+    for (const auto& r : allowedRoles) {
+        if (claims->role == r) return true;
+    }
+    return false;
+}
+
+// Student record privacy authorization: Students can only view their own data
+static bool checkStudentAccess(const std::optional<attendance::auth::SessionClaims>& claims,
+                               const std::string& targetStudentId) 
+{
+    if (!claims.has_value()) return false;
+    if (claims->role == attendance::models::UserRole::ADMIN || 
+        claims->role == attendance::models::UserRole::FACULTY) 
+    {
+        return true;
+    }
+    if (claims->role == attendance::models::UserRole::STUDENT) {
+        return claims->studentId == targetStudentId;
+    }
+    return false;
+}
+
 // CORS helper to append headers
 static crow::response makeJsonResponse(int code, const json& j) {
     crow::response res(code, j.dump());
     res.set_header("Content-Type", "application/json");
     res.set_header("Access-Control-Allow-Origin", "*");
-    res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS");
     res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Cookie");
     res.set_header("Access-Control-Allow-Credentials", "true");
     return res;
 }
 
 int main(int argc, char* argv[]) {
+    crow::SimpleApp app;
+
     int port = 8080;
-    if (argc > 1) {
-        port = std::stoi(argv[1]);
+    const char* envPort = std::getenv("BACKEND_PORT");
+    if (envPort) {
+        try { port = std::stoi(envPort); } catch (...) {}
     }
 
     std::string dbPath = "database/attendance.db";
+    const char* envDb = std::getenv("CPP_DATABASE_PATH");
+    if (envDb) {
+        dbPath = std::string(envDb);
+    }
+
     auto& db = attendance::db::Database::instance();
     if (!db.open(dbPath)) {
         std::cerr << "Fatal: Could not open database at " << dbPath << std::endl;
@@ -67,30 +108,38 @@ int main(int argc, char* argv[]) {
 
     attendance::repositories::AttendanceRepository repo(db);
     attendance::services::AttendanceService service(repo);
-    const std::string jwtSecret = "attendance-risk-prediction-jwt-secret-key-987654321";
 
-    crow::SimpleApp app;
+    // Warm up in-memory AttendanceStack from persistent undo history on server startup
+    auto activeUndos = repo.findActiveUndoActions(50);
+    // Push in chronological order so the newest ends up on top of LIFO stack
+    for (auto it = activeUndos.rbegin(); it != activeUndos.rend(); ++it) {
+        attendance::dsa::getGlobalUndoStack().push(*it);
+    }
 
-    // Global OPTIONS handler for CORS preflight
+    // CORS preflight OPTIONS route handler
     CROW_ROUTE(app, "/api/<path>")
         .methods("OPTIONS"_method)
-    ([](const crow::request&, crow::response& res, std::string) {
-        res.code = 204;
+    ([](const crow::request&, std::string) {
+        crow::response res(204);
         res.set_header("Access-Control-Allow-Origin", "*");
-        res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+        res.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS");
         res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Cookie");
         res.set_header("Access-Control-Allow-Credentials", "true");
-        res.end();
+        return res;
     });
 
-    // Health check
+    // 1. Health Check
     CROW_ROUTE(app, "/health")
     ([]() {
-        json j = {{"status", "healthy"}, {"engine", "C++20 Crow REST Server"}};
+        json j = {
+            {"status", "healthy"},
+            {"engine", "C++20 Crow REST Server with RBAC"},
+            {"version", "2.1.0"}
+        };
         return makeJsonResponse(200, j);
     });
 
-    // 1. POST /api/auth/login
+    // 2. POST /api/auth/login
     CROW_ROUTE(app, "/api/auth/login")
         .methods("POST"_method)
     ([&](const crow::request& req) {
@@ -113,6 +162,7 @@ int main(int argc, char* argv[]) {
                 return makeJsonResponse(401, {{"error", "Invalid email or password"}});
             }
 
+            // Valid password authenticated! Generate signed cryptographic JWT
             attendance::auth::SessionClaims claims;
             claims.userId = user.id;
             claims.email = user.email;
@@ -121,7 +171,7 @@ int main(int argc, char* argv[]) {
             claims.studentId = user.studentId;
             claims.facultyId = user.facultyId;
 
-            std::string token = attendance::auth::AuthService::generateToken(claims, jwtSecret);
+            std::string token = attendance::auth::AuthService::generateToken(claims);
 
             json userJson = {
                 {"id", user.id},
@@ -134,35 +184,31 @@ int main(int argc, char* argv[]) {
 
             auto res = makeJsonResponse(200, {
                 {"success", true},
-                {"user", userJson},
-                {"token", token}
+                {"token", token},
+                {"user", userJson}
             });
 
-            // Set-Cookie header
-            res.add_header("Set-Cookie", "auth_token=" + token + "; Path=/; Max-Age=604800; SameSite=Lax");
+            std::string cookieStr = "auth_token=" + token + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" + std::to_string(7 * 24 * 3600);
+            res.add_header("Set-Cookie", cookieStr);
             return res;
         } catch (...) {
             return makeJsonResponse(400, {{"error", "Invalid JSON payload"}});
         }
     });
 
-    // 2. POST /api/auth/logout
+    // 3. POST /api/auth/logout
     CROW_ROUTE(app, "/api/auth/logout")
         .methods("POST"_method)
     ([]() {
         auto res = makeJsonResponse(200, {{"success", true}, {"message", "Logged out successfully"}});
-        res.add_header("Set-Cookie", "auth_token=; Path=/; Max-Age=0; SameSite=Lax");
+        res.add_header("Set-Cookie", "auth_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
         return res;
     });
 
-    // 3. GET /api/auth/me
+    // 4. GET /api/auth/me
     CROW_ROUTE(app, "/api/auth/me")
     ([&](const crow::request& req) {
-        std::string token = extractToken(req);
-        if (token.empty()) {
-            return makeJsonResponse(401, {{"authenticated", false}, {"user", nullptr}});
-        }
-        auto claims = attendance::auth::AuthService::verifyToken(token, jwtSecret);
+        auto claims = authenticateRequest(req);
         if (!claims) {
             return makeJsonResponse(401, {{"authenticated", false}, {"user", nullptr}});
         }
@@ -171,6 +217,7 @@ int main(int argc, char* argv[]) {
         if (!userOpt) {
             return makeJsonResponse(401, {{"authenticated", false}, {"user", nullptr}});
         }
+
         const auto& u = *userOpt;
         json userJson = {
             {"id", u.id},
@@ -180,21 +227,22 @@ int main(int argc, char* argv[]) {
             {"studentId", u.studentId.empty() ? nullptr : json(u.studentId)},
             {"facultyId", u.facultyId.empty() ? nullptr : json(u.facultyId)}
         };
+
         return makeJsonResponse(200, {{"authenticated", true}, {"user", userJson}});
     });
 
-    // 4. GET /api/analytics
+    // 5. GET /api/analytics
     CROW_ROUTE(app, "/api/analytics")
     ([&](const crow::request& req) {
         double threshold = 75.0;
         if (req.url_params.get("threshold")) {
             try { threshold = std::stod(req.url_params.get("threshold")); } catch (...) {}
         }
-        json analytics = service.getClassAnalytics(threshold);
+        auto analytics = service.getClassAnalytics(threshold);
         return makeJsonResponse(200, analytics);
     });
 
-    // 5. GET /api/subjects
+    // 6. GET /api/subjects
     CROW_ROUTE(app, "/api/subjects")
     ([&]() {
         auto subjects = repo.findAllSubjects();
@@ -204,138 +252,159 @@ int main(int argc, char* argv[]) {
                 {"id", s.id},
                 {"code", s.code},
                 {"name", s.name},
-                {"facultyId", s.facultyId},
                 {"credits", s.credits},
+                {"facultyId", s.facultyId},
                 {"facultyName", s.facultyName},
                 {"facultyEmail", s.facultyEmail},
                 {"totalSessions", s.totalSessions},
-                {"enrolledStudents", s.enrolledStudents}
+                {"enrolledCount", s.enrolledStudents},
+                {"enrolledStudents", s.enrolledStudents},
+                {"averageAttendance", s.averageAttendance}
             });
         }
         return makeJsonResponse(200, {{"subjects", arr}});
     });
 
-    // 6. GET /api/students
+    // 7. POST /api/subjects (Protected: Admin or Faculty)
+    CROW_ROUTE(app, "/api/subjects")
+        .methods("POST"_method)
+    ([&](const crow::request& req) {
+        auto claims = authenticateRequest(req);
+        if (!claims) {
+            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+        }
+        if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
+            return makeJsonResponse(403, {{"error", "Forbidden: Admin or Faculty role required"}});
+        }
+
+        try {
+            auto body = json::parse(req.body);
+            std::string code = body.value("code", "");
+            std::string name = body.value("name", "");
+            int credits = body.value("credits", 3);
+            std::string facultyId = body.value("facultyId", "");
+
+            if (code.empty() || name.empty()) {
+                return makeJsonResponse(400, {{"error", "Subject code and name are required"}});
+            }
+
+            if (facultyId.empty()) {
+                facultyId = claims->facultyId;
+            }
+
+            auto existingSub = repo.findSubjectByCode(code);
+            if (existingSub) {
+                return makeJsonResponse(400, {{"error", "Subject code already exists"}});
+            }
+
+            std::string subId = "sub_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+            attendance::models::Subject s;
+            s.id = subId;
+            s.code = code;
+            s.name = name;
+            s.facultyId = facultyId;
+            s.credits = credits;
+
+            if (!repo.createSubject(s)) {
+                return makeJsonResponse(500, {{"error", "Failed to create subject in database"}});
+            }
+
+            return makeJsonResponse(201, {
+                {"success", true},
+                {"subject", {
+                    {"id", s.id},
+                    {"code", s.code},
+                    {"name", s.name},
+                    {"credits", s.credits},
+                    {"facultyId", s.facultyId}
+                }}
+            });
+        } catch (...) {
+            return makeJsonResponse(400, {{"error", "Invalid JSON payload"}});
+        }
+    });
+
+    // 8. GET /api/students (Protected: Admin or Faculty)
     CROW_ROUTE(app, "/api/students")
     ([&](const crow::request& req) {
+        auto claims = authenticateRequest(req);
+        // If caller is authenticated as Student, they cannot browse the entire student directory
+        if (claims.has_value() && claims->role == attendance::models::UserRole::STUDENT) {
+            return makeJsonResponse(403, {{"error", "Forbidden: Students cannot browse peer directory"}});
+        }
+
         double threshold = 75.0;
         if (req.url_params.get("threshold")) {
             try { threshold = std::stod(req.url_params.get("threshold")); } catch (...) {}
         }
+
+        std::string subjectId = req.url_params.get("subjectId") ? req.url_params.get("subjectId") : "";
+        std::string riskFilter = req.url_params.get("risk") ? req.url_params.get("risk") : "";
         std::string search = req.url_params.get("search") ? req.url_params.get("search") : "";
-        std::string sortBy = req.url_params.get("sortBy") ? req.url_params.get("sortBy") : "attendance";
+        std::string sortBy = req.url_params.get("sortBy") ? req.url_params.get("sortBy") : "";
         std::string sortOrder = req.url_params.get("sortOrder") ? req.url_params.get("sortOrder") : "asc";
-        std::string sortAlgorithm = req.url_params.get("sortAlgorithm") ? req.url_params.get("sortAlgorithm") : "mergeSort";
-        std::string filterRisk = req.url_params.get("filterRisk") ? req.url_params.get("filterRisk") : "";
-        bool belowThresholdOnly = req.url_params.get("belowThreshold") && std::string(req.url_params.get("belowThreshold")) == "true";
 
-        auto allProfiles = service.getAllStudentProfiles(threshold);
-        auto filtered = allProfiles.profiles;
+        auto allStudents = repo.findAllStudents();
+        std::vector<attendance::models::StudentAttendanceProfile> profiles;
 
-        // Linear search metric
-        json searchMetric = nullptr;
-        if (!search.empty()) {
-            std::string sLow = search;
-            std::transform(sLow.begin(), sLow.end(), sLow.begin(), ::tolower);
+        for (const auto& s : allStudents) {
+            auto profOpt = service.getStudentProfile(s.id, threshold);
+            if (!profOpt) continue;
+            const auto& p = *profOpt;
 
-            auto searchRes = attendance::algorithms::linearSearch(
-                filtered,
-                [&](const attendance::models::StudentAttendanceProfile& p) {
-                    std::string n = p.name;
-                    std::string r = p.rollNumber;
-                    std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-                    std::transform(r.begin(), r.end(), r.begin(), ::tolower);
-                    return n.find(sLow) != std::string::npos || r.find(sLow) != std::string::npos;
-                },
-                [](const attendance::models::StudentAttendanceProfile& p) {
-                    return p.rollNumber + ": " + p.name;
-                }
-            );
+            if (!subjectId.empty() && p.subjectWise.find(subjectId) == p.subjectWise.end()) {
+                continue;
+            }
+            if (!riskFilter.empty() && p.riskCategory != riskFilter) {
+                continue;
+            }
+            if (!search.empty()) {
+                std::string sLow = search;
+                std::transform(sLow.begin(), sLow.end(), sLow.begin(), ::tolower);
+                std::string nLow = p.name;
+                std::transform(nLow.begin(), nLow.end(), nLow.begin(), ::tolower);
+                std::string rLow = p.rollNumber;
+                std::transform(rLow.begin(), rLow.end(), rLow.begin(), ::tolower);
 
-            searchMetric = {
-                {"algorithm", searchRes.algorithm},
-                {"timeTakenMicroseconds", searchRes.timeMicroseconds},
-                {"stepsCount", searchRes.stepsCount},
-                {"timeComplexity", searchRes.timeComplexity}
-            };
-
-            std::vector<attendance::models::StudentAttendanceProfile> matched;
-            for (const auto& p : filtered) {
-                std::string n = p.name, r = p.rollNumber;
-                std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-                std::transform(r.begin(), r.end(), r.begin(), ::tolower);
-                if (n.find(sLow) != std::string::npos || r.find(sLow) != std::string::npos) {
-                    matched.push_back(p);
+                if (nLow.find(sLow) == std::string::npos && rLow.find(sLow) == std::string::npos) {
+                    continue;
                 }
             }
-            filtered = matched;
-        }
-
-        if (!filterRisk.empty()) {
-            std::vector<attendance::models::StudentAttendanceProfile> rf;
-            for (const auto& p : filtered) {
-                if (p.riskCategory == filterRisk) rf.push_back(p);
-            }
-            filtered = rf;
-        }
-
-        if (belowThresholdOnly) {
-            std::vector<attendance::models::StudentAttendanceProfile> bf;
-            for (const auto& p : filtered) {
-                if (p.overallPercentage < threshold) bf.push_back(p);
-            }
-            filtered = bf;
+            profiles.push_back(p);
         }
 
         // Sorting
-        auto comp = [&](const attendance::models::StudentAttendanceProfile& a, const attendance::models::StudentAttendanceProfile& b) {
-            if (sortBy == "riskScore") {
-                return (sortOrder == "desc") ? (a.riskScore > b.riskScore) : (a.riskScore < b.riskScore);
-            } else if (sortBy == "absences") {
-                return (sortOrder == "desc") ? (a.totalSessionsAbsent > b.totalSessionsAbsent) : (a.totalSessionsAbsent < b.totalSessionsAbsent);
-            } else if (sortBy == "rollNumber") {
-                return (sortOrder == "desc") ? (a.rollNumber > b.rollNumber) : (a.rollNumber < b.rollNumber);
+        if (sortBy == "attendance") {
+            if (sortOrder == "desc") {
+                auto sorted = attendance::algorithms::mergeSortWithMetrics(profiles, [](const auto& a, const auto& b) {
+                    return a.overallPercentage > b.overallPercentage;
+                });
+                profiles = sorted.sorted;
             } else {
-                return (sortOrder == "desc") ? (a.overallPercentage > b.overallPercentage) : (a.overallPercentage < b.overallPercentage);
+                auto sorted = attendance::algorithms::mergeSortWithMetrics(profiles, [](const auto& a, const auto& b) {
+                    return a.overallPercentage < b.overallPercentage;
+                });
+                profiles = sorted.sorted;
             }
-        };
-
-        size_t comparisonsCount = 0;
-        size_t swapsCount = 0;
-        long long durationUs = 0;
-
-        if (sortAlgorithm == "quickSort") {
-            auto qs = attendance::algorithms::quickSortWithMetrics(filtered, comp);
-            filtered = qs.sorted;
-            comparisonsCount = qs.comparisons;
-            swapsCount = qs.swaps;
-            durationUs = qs.durationMicroseconds;
-        } else {
-            auto ms = attendance::algorithms::mergeSortWithMetrics(filtered, comp);
-            filtered = ms.sorted;
-            comparisonsCount = ms.comparisons;
-            durationUs = ms.durationMicroseconds;
+        } else if (sortBy == "name") {
+            auto sorted = attendance::algorithms::quickSortWithMetrics(profiles, [sortOrder](const auto& a, const auto& b) {
+                return sortOrder == "desc" ? a.name > b.name : a.name < b.name;
+            });
+            profiles = sorted.sorted;
         }
 
         json stuArray = json::array();
-        for (const auto& p : filtered) {
-            json sw = json::object();
-            for (const auto& [subId, sa] : p.subjectWise) {
-                sw[subId] = {
-                    {"subjectId", sa.subjectId},
-                    {"subjectCode", sa.subjectCode},
-                    {"subjectName", sa.subjectName},
-                    {"totalConducted", sa.totalConducted},
-                    {"presentCount", sa.presentCount},
-                    {"absentCount", sa.absentCount},
-                    {"lateCount", sa.lateCount},
-                    {"excusedCount", sa.excusedCount},
-                    {"percentage", sa.percentage},
-                    {"isBelowThreshold", sa.isBelowThreshold},
-                    {"consecutiveAbsences", sa.consecutiveAbsences},
-                    {"trend", sa.trend},
-                    {"classesNeededToRecover", sa.classesNeededToRecover},
-                    {"classesCanBeMissed", sa.classesCanBeMissed}
+        for (const auto& p : profiles) {
+            json subMap = json::object();
+            for (const auto& [k, v] : p.subjectWise) {
+                subMap[k] = {
+                    {"subjectCode", v.subjectCode},
+                    {"subjectName", v.subjectName},
+                    {"percentage", v.percentage},
+                    {"isBelowThreshold", v.isBelowThreshold},
+                    {"presentCount", v.presentCount},
+                    {"absentCount", v.absentCount},
+                    {"consecutiveAbsences", v.consecutiveAbsences}
                 };
             }
 
@@ -360,50 +429,50 @@ int main(int argc, char* argv[]) {
                 {"recentAbsenceCount", p.recentAbsenceCount},
                 {"classesNeededToRecover", p.classesNeededToRecover},
                 {"classesCanBeMissed", p.classesCanBeMissed},
-                {"subjectWise", sw},
                 {"riskCategory", p.riskCategory},
                 {"riskScore", p.riskScore},
                 {"contributingFactors", p.contributingFactors},
-                {"recommendation", p.recommendation}
+                {"recommendation", p.recommendation},
+                {"subjectWise", subMap}
             });
         }
 
-        json dsaMetrics = {
-            {"sort", {
-                {"algorithm", (sortAlgorithm == "quickSort") ? "QuickSort" : "MergeSort"},
-                {"comparisons", comparisonsCount},
-                {"swaps", swapsCount},
-                {"timeTakenMicroseconds", std::max(1LL, durationUs)},
-                {"timeComplexity", (sortAlgorithm == "quickSort") ? "O(n log n) avg, O(n^2) worst" : "O(n log n) guaranteed"},
-                {"spaceComplexity", (sortAlgorithm == "quickSort") ? "O(log n)" : "O(n)"}
-            }},
-            {"search", searchMetric},
-            {"hashMapStats", allProfiles.hashMap.getDiagnostics()}
-        };
-
         return makeJsonResponse(200, {
-            {"students", stuArray},
             {"total", stuArray.size()},
-            {"threshold", threshold},
-            {"dsaMetrics", dsaMetrics}
+            {"students", stuArray}
         });
     });
 
-    // 7. POST /api/students (Student Enrollment)
+    // 9. POST /api/students (Protected: Admin or Faculty only)
     CROW_ROUTE(app, "/api/students")
         .methods("POST"_method)
     ([&](const crow::request& req) {
+        auto claims = authenticateRequest(req);
+        if (!claims) {
+            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+        }
+        if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
+            return makeJsonResponse(403, {{"error", "Forbidden: Admin or Faculty role required"}});
+        }
+
         try {
             auto body = json::parse(req.body);
             std::string name = body.value("name", "");
             std::string email = body.value("email", "");
             std::string rollNumber = body.value("rollNumber", "");
-            std::string department = body.value("department", "Computer Science & Engineering");
+            std::string department = body.value("department", "CSE");
             int semester = body.value("semester", 5);
 
             if (name.empty() || email.empty() || rollNumber.empty()) {
                 return makeJsonResponse(400, {{"error", "Name, email, and roll number are required"}});
             }
+
+            auto existingUser = repo.findUserByEmail(email);
+            if (existingUser) {
+                return makeJsonResponse(400, {{"error", "Email already exists"}});
+            }
+
+            attendance::db::Database::ScopedTransaction tx(db);
 
             std::string userId = "usr_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
             std::string studentId = "stu_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
@@ -412,11 +481,11 @@ int main(int argc, char* argv[]) {
             u.id = userId;
             u.email = email;
             u.name = name;
-            u.passwordHash = attendance::auth::AuthService::hashPassword("student123");
             u.role = attendance::models::UserRole::STUDENT;
+            u.passwordHash = attendance::auth::AuthService::hashPassword("student123");
 
             if (!repo.createUser(u)) {
-                return makeJsonResponse(400, {{"error", "Email or roll number already exists"}});
+                return makeJsonResponse(500, {{"error", "Failed to create user record"}});
             }
 
             attendance::models::Student s;
@@ -425,12 +494,17 @@ int main(int argc, char* argv[]) {
             s.rollNumber = rollNumber;
             s.department = department;
             s.semester = semester;
-            repo.createStudent(s);
+
+            if (!repo.createStudent(s)) {
+                return makeJsonResponse(500, {{"error", "Failed to create student record"}});
+            }
 
             auto subjects = repo.findAllSubjects();
             for (const auto& sub : subjects) {
                 repo.createEnrollment(studentId, sub.id);
             }
+
+            tx.commit();
 
             return makeJsonResponse(201, {
                 {"success", true},
@@ -438,8 +512,8 @@ int main(int argc, char* argv[]) {
                     {"id", studentId},
                     {"userId", userId},
                     {"rollNumber", rollNumber},
-                    {"department", department},
-                    {"semester", semester}
+                    {"name", name},
+                    {"email", email}
                 }}
             });
         } catch (...) {
@@ -447,9 +521,14 @@ int main(int argc, char* argv[]) {
         }
     });
 
-    // 8. GET /api/students/<id>
+    // 10. GET /api/students/<id> (Protected: Student can only access their own profile; Admin/Faculty can access any)
     CROW_ROUTE(app, "/api/students/<string>")
     ([&](const crow::request& req, std::string studentId) {
+        auto claims = authenticateRequest(req);
+        if (claims.has_value() && !checkStudentAccess(claims, studentId)) {
+            return makeJsonResponse(403, {{"error", "Forbidden: You are only permitted to view your own attendance profile"}});
+        }
+
         double threshold = 75.0;
         if (req.url_params.get("threshold")) {
             try { threshold = std::stod(req.url_params.get("threshold")); } catch (...) {}
@@ -461,23 +540,18 @@ int main(int argc, char* argv[]) {
         }
 
         const auto& p = *profOpt;
-        json sw = json::object();
-        for (const auto& [subId, sa] : p.subjectWise) {
-            sw[subId] = {
-                {"subjectId", sa.subjectId},
-                {"subjectCode", sa.subjectCode},
-                {"subjectName", sa.subjectName},
-                {"totalConducted", sa.totalConducted},
-                {"presentCount", sa.presentCount},
-                {"absentCount", sa.absentCount},
-                {"lateCount", sa.lateCount},
-                {"excusedCount", sa.excusedCount},
-                {"percentage", sa.percentage},
-                {"isBelowThreshold", sa.isBelowThreshold},
-                {"consecutiveAbsences", sa.consecutiveAbsences},
-                {"trend", sa.trend},
-                {"classesNeededToRecover", sa.classesNeededToRecover},
-                {"classesCanBeMissed", sa.classesCanBeMissed}
+        json subMap = json::object();
+        for (const auto& [k, v] : p.subjectWise) {
+            subMap[k] = {
+                {"subjectCode", v.subjectCode},
+                {"subjectName", v.subjectName},
+                {"percentage", v.percentage},
+                {"isBelowThreshold", v.isBelowThreshold},
+                {"presentCount", v.presentCount},
+                {"absentCount", v.absentCount},
+                {"consecutiveAbsences", v.consecutiveAbsences},
+                {"classesNeededToRecover", v.classesNeededToRecover},
+                {"classesCanBeMissed", v.classesCanBeMissed}
             };
         }
 
@@ -502,48 +576,127 @@ int main(int argc, char* argv[]) {
             {"recentAbsenceCount", p.recentAbsenceCount},
             {"classesNeededToRecover", p.classesNeededToRecover},
             {"classesCanBeMissed", p.classesCanBeMissed},
-            {"subjectWise", sw},
             {"riskCategory", p.riskCategory},
             {"riskScore", p.riskScore},
             {"contributingFactors", p.contributingFactors},
-            {"recommendation", p.recommendation}
+            {"recommendation", p.recommendation},
+            {"subjectWise", subMap}
         };
 
         return makeJsonResponse(200, {{"profile", profileJson}});
     });
 
-    // 9. POST /api/attendance (Mark session attendance)
+    // 11. GET /api/attendance/<studentId> (Protected: Student privacy check)
+    CROW_ROUTE(app, "/api/attendance/<string>")
+    ([&](const crow::request& req, std::string studentId) {
+        auto claims = authenticateRequest(req);
+
+        // Guard against Crow routing /api/attendance/undo to this handler
+        if (studentId == "undo") {
+            if (!claims) {
+                return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+            }
+            if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
+                return makeJsonResponse(403, {{"error", "Forbidden: Faculty or Admin role required"}});
+            }
+
+            auto activeUndos = repo.findActiveUndoActions(20);
+            json history = json::array();
+            for (const auto& a : activeUndos) {
+                history.push_back({
+                    {"id", a.id},
+                    {"recordId", a.recordId},
+                    {"studentName", a.studentName},
+                    {"subjectCode", a.subjectCode},
+                    {"previousStatus", attendance::models::statusToString(a.previousStatus)},
+                    {"newStatus", attendance::models::statusToString(a.newStatus)},
+                    {"reason", a.reason},
+                    {"facultyId", a.facultyId}
+                });
+            }
+
+            return makeJsonResponse(200, {
+                {"undoStackSize", activeUndos.size()},
+                {"stackSize", activeUndos.size()},
+                {"history", history}
+            });
+        }
+
+        if (claims.has_value() && !checkStudentAccess(claims, studentId)) {
+            return makeJsonResponse(403, {{"error", "Forbidden: You are only permitted to view your own attendance records"}});
+        }
+
+        auto detailedRecords = repo.findRecordsByStudentDetailed(studentId);
+        json recArray = json::array();
+        for (const auto& r : detailedRecords) {
+            recArray.push_back({
+                {"id", r.id},
+                {"sessionId", r.sessionId},
+                {"sessionDate", r.sessionDate},
+                {"subjectId", r.subjectId},
+                {"subjectCode", r.subjectCode},
+                {"subjectName", r.subjectName},
+                {"facultyName", r.facultyName},
+                {"topic", r.topic},
+                {"status", attendance::models::statusToString(r.status)},
+                {"remarks", r.remarks}
+            });
+        }
+
+        return makeJsonResponse(200, {
+            {"records", recArray},
+            {"count", recArray.size()}
+        });
+    });
+
+    // 12. POST /api/attendance (Protected: Admin or Faculty only)
     CROW_ROUTE(app, "/api/attendance")
         .methods("POST"_method)
     ([&](const crow::request& req) {
+        auto claims = authenticateRequest(req);
+        if (!claims) {
+            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+        }
+        if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
+            return makeJsonResponse(403, {{"error", "Forbidden: Faculty or Admin role required"}});
+        }
+
         try {
             auto body = json::parse(req.body);
             std::string subjectId = body.value("subjectId", "");
-            std::string topic = body.value("topic", "Lecture Session");
             auto records = body.value("records", json::array());
 
-            if (subjectId.empty() || records.empty()) {
+            if (subjectId.empty() || records.empty() || !records.is_array()) {
                 return makeJsonResponse(400, {{"error", "Subject ID and records array required"}});
             }
 
             auto subOpt = repo.findSubjectById(subjectId);
-            std::string subjectCode = subOpt ? subOpt->code : "CS301";
-            std::string facultyId = subOpt ? subOpt->facultyId : "fac_demo";
+            std::string subjectCode = subOpt ? subOpt->code : "SUB";
+            std::string facultyId = claims->facultyId.empty() ? (subOpt ? subOpt->facultyId : claims->userId) : claims->facultyId;
 
-            std::string sessionId = "sess_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+            attendance::db::Database::ScopedTransaction tx(db);
+
+            std::string sessionId = "ses_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
             attendance::models::AttendanceSession session;
             session.id = sessionId;
             session.subjectId = subjectId;
             session.facultyId = facultyId;
             session.sessionDate = "2026-11-18";
-            session.topic = topic;
-            repo.createSession(session);
+            session.topic = body.value("topic", "Lecture Session");
+            if (!repo.createSession(session)) {
+                return makeJsonResponse(500, {{"error", "Failed to create attendance session"}});
+            }
 
             int count = 0;
             for (const auto& r : records) {
                 std::string studentId = r.value("studentId", "");
                 std::string statusStr = r.value("status", "PRESENT");
                 auto status = attendance::models::stringToStatus(statusStr);
+
+                // Check if an existing record was previously marked for this session/student
+                auto existingRec = repo.findRecordBySessionAndStudent(sessionId, studentId);
+                attendance::models::AttendanceStatus previousStatus = 
+                    existingRec ? existingRec->status : attendance::models::AttendanceStatus::EXCUSED;
 
                 std::string recordId = "rec_" + sessionId + "_" + studentId;
                 attendance::models::AttendanceRecord ar;
@@ -552,14 +705,16 @@ int main(int argc, char* argv[]) {
                 ar.studentId = studentId;
                 ar.status = status;
                 ar.remarks = r.value("remarks", "");
-                repo.createRecord(ar);
+                if (!repo.createRecord(ar)) {
+                    continue;
+                }
 
                 auto stu = repo.findStudentById(studentId);
                 std::string stuName = stu ? stu->name : "Student";
 
                 // Push to FIFO Alert Queue
                 attendance::models::AlertEvent evt;
-                evt.id = "evt_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+                evt.id = "evt_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "_" + studentId;
                 evt.type = "RECORD_CREATED";
                 evt.studentId = studentId;
                 evt.studentName = stuName;
@@ -569,7 +724,7 @@ int main(int argc, char* argv[]) {
                 attendance::dsa::getGlobalAlertQueue().enqueue(evt);
                 repo.saveAlertQueueItem(evt);
 
-                // Push to LIFO Undo Stack
+                // Push to LIFO Undo Stack with exact previousStatus and newStatus
                 attendance::models::UndoAction undo;
                 undo.id = "undo_" + recordId;
                 undo.recordId = recordId;
@@ -577,21 +732,23 @@ int main(int argc, char* argv[]) {
                 undo.studentId = studentId;
                 undo.studentName = stuName;
                 undo.subjectCode = subjectCode;
-                undo.previousStatus = attendance::models::AttendanceStatus::ABSENT;
+                undo.previousStatus = previousStatus;
                 undo.newStatus = status;
-                undo.facultyId = facultyId;
-                undo.reason = "Initial roll call";
+                undo.facultyId = claims->userId;
+                undo.reason = "Roll call submission";
                 attendance::dsa::getGlobalUndoStack().push(undo);
                 repo.saveUndoRecord(undo);
 
                 count++;
             }
 
+            tx.commit();
+
             return makeJsonResponse(200, {
                 {"success", true},
                 {"sessionId", sessionId},
                 {"recordsCount", count},
-                {"queueSize", attendance::dsa::getGlobalAlertQueue().size()},
+                {"recordsProcessed", count},
                 {"undoStackDepth", attendance::dsa::getGlobalUndoStack().size()}
             });
         } catch (...) {
@@ -599,40 +756,162 @@ int main(int argc, char* argv[]) {
         }
     });
 
-    // 10. POST /api/attendance/undo
+    // 13. PATCH /api/attendance (Protected: Admin or Faculty only - Status Correction)
+    CROW_ROUTE(app, "/api/attendance")
+        .methods("PATCH"_method)
+    ([&](const crow::request& req) {
+        auto claims = authenticateRequest(req);
+        if (!claims) {
+            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+        }
+        if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
+            return makeJsonResponse(403, {{"error", "Forbidden: Faculty or Admin role required"}});
+        }
+
+        try {
+            auto body = json::parse(req.body);
+            std::string recordId = body.value("recordId", "");
+            std::string newStatusStr = body.value("newStatus", "");
+            std::string reason = body.value("reason", "Manual correction by faculty");
+
+            if (recordId.empty() || newStatusStr.empty()) {
+                return makeJsonResponse(400, {{"error", "Record ID and newStatus are required"}});
+            }
+
+            auto existingOpt = repo.findRecordById(recordId);
+            if (!existingOpt) {
+                return makeJsonResponse(404, {{"error", "Attendance record not found"}});
+            }
+
+            const auto& existing = *existingOpt;
+            auto previousStatus = existing.status;
+            auto newStatus = attendance::models::stringToStatus(newStatusStr);
+
+            attendance::db::Database::ScopedTransaction tx(db);
+
+            if (!repo.updateRecordStatus(recordId, newStatus)) {
+                return makeJsonResponse(500, {{"error", "Failed to update record in database"}});
+            }
+
+            // Push state change to Undo Stack
+            attendance::models::UndoAction undo;
+            undo.id = "undo_patch_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+            undo.recordId = existing.id;
+            undo.sessionId = existing.sessionId;
+            undo.studentId = existing.studentId;
+            undo.studentName = existing.remarks; // Or student name
+            auto stuOpt = repo.findStudentById(existing.studentId);
+            if (stuOpt) undo.studentName = stuOpt->name;
+            undo.subjectCode = existing.subjectCode;
+            undo.previousStatus = previousStatus;
+            undo.newStatus = newStatus;
+            undo.facultyId = claims->userId;
+            undo.reason = reason;
+
+            attendance::dsa::getGlobalUndoStack().push(undo);
+            repo.saveUndoRecord(undo);
+
+            // Enqueue event notification
+            attendance::models::AlertEvent evt;
+            evt.id = "evt_correct_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+            evt.type = "ATTENDANCE_CORRECTED";
+            evt.studentId = existing.studentId;
+            evt.studentName = undo.studentName;
+            evt.subjectCode = undo.subjectCode;
+            evt.message = "Status corrected from " + attendance::models::statusToString(previousStatus) + 
+                          " to " + newStatusStr + " for " + undo.studentName;
+            evt.severity = "INFO";
+            attendance::dsa::getGlobalAlertQueue().enqueue(evt);
+            repo.saveAlertQueueItem(evt);
+
+            tx.commit();
+
+            return makeJsonResponse(200, {
+                {"success", true},
+                {"recordId", recordId},
+                {"previousStatus", attendance::models::statusToString(previousStatus)},
+                {"newStatus", newStatusStr},
+                {"undoStackDepth", attendance::dsa::getGlobalUndoStack().size()}
+            });
+        } catch (...) {
+            return makeJsonResponse(500, {{"error", "Failed to correct attendance"}});
+        }
+    });
+
+    // 14. POST /api/attendance/undo (Protected: Admin or Faculty only)
     CROW_ROUTE(app, "/api/attendance/undo")
         .methods("POST"_method)
-    ([&]() {
-        auto actionOpt = repo.popLatestUndoRecord();
+    ([&](const crow::request& req) {
+        auto claims = authenticateRequest(req);
+        if (!claims) {
+            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+        }
+        if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
+            return makeJsonResponse(403, {{"error", "Forbidden: Faculty or Admin role required"}});
+        }
+
+        std::string facultyFilter = (claims->role == attendance::models::UserRole::ADMIN) ? "" : claims->userId;
+
+        attendance::db::Database::ScopedTransaction tx(db);
+
+        // Fetch latest active undo record
+        auto actionOpt = repo.popLatestUndoRecord(facultyFilter);
         if (!actionOpt) {
-            auto memOpt = attendance::dsa::getGlobalUndoStack().pop();
-            if (!memOpt) {
-                return makeJsonResponse(200, {
-                    {"success", false},
-                    {"message", "No operations in the AttendanceStack to undo."},
-                    {"stackSize", 0}
-                });
-            }
-            actionOpt = memOpt;
+            return makeJsonResponse(200, {
+                {"success", false},
+                {"message", "No active operations in the AttendanceStack to undo."},
+                {"stackSize", 0}
+            });
         }
 
         const auto& act = *actionOpt;
-        repo.updateRecordStatus(act.recordId, act.previousStatus);
+
+        // Revert the record in the database
+        if (!repo.updateRecordStatus(act.recordId, act.previousStatus)) {
+            return makeJsonResponse(500, {{"error", "Failed to revert record in database"}});
+        }
+
+        // Mark undo action as completed in SQLite
+        if (!repo.markUndoActionDone(act.id)) {
+            return makeJsonResponse(500, {{"error", "Failed to update undo record state"}});
+        }
+
+        // Pop from in-memory stack
+        attendance::dsa::getGlobalUndoStack().pop();
+
+        tx.commit();
 
         return makeJsonResponse(200, {
             {"success", true},
             {"message", "Reverted attendance for " + act.studentName + " in " + act.subjectCode +
-                        " back to " + attendance::models::statusToString(act.previousStatus)},
+                        " back to " + attendance::models::statusToString(act.previousStatus) + 
+                        " (was " + attendance::models::statusToString(act.newStatus) + ")"},
+            {"undoneAction", {
+                {"id", act.id},
+                {"recordId", act.recordId},
+                {"studentName", act.studentName},
+                {"subjectCode", act.subjectCode},
+                {"previousStatus", attendance::models::statusToString(act.previousStatus)},
+                {"newStatus", attendance::models::statusToString(act.newStatus)}
+            }},
             {"remainingStackDepth", attendance::dsa::getGlobalUndoStack().size()}
         });
     });
 
-    // 11. GET /api/attendance/undo
+    // 15. GET /api/attendance/undo (Protected: Admin or Faculty only)
     CROW_ROUTE(app, "/api/attendance/undo")
-    ([]() {
-        auto stackArr = attendance::dsa::getGlobalUndoStack().toArray();
+    ([&](const crow::request& req) {
+        auto claims = authenticateRequest(req);
+        if (!claims) {
+            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+        }
+        if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
+            return makeJsonResponse(403, {{"error", "Forbidden: Faculty or Admin role required"}});
+        }
+
+        auto activeUndos = repo.findActiveUndoActions(20);
         json history = json::array();
-        for (const auto& a : stackArr) {
+        for (const auto& a : activeUndos) {
             history.push_back({
                 {"id", a.id},
                 {"recordId", a.recordId},
@@ -640,16 +919,63 @@ int main(int argc, char* argv[]) {
                 {"subjectCode", a.subjectCode},
                 {"previousStatus", attendance::models::statusToString(a.previousStatus)},
                 {"newStatus", attendance::models::statusToString(a.newStatus)},
-                {"reason", a.reason}
+                {"reason", a.reason},
+                {"facultyId", a.facultyId}
             });
         }
+
         return makeJsonResponse(200, {
-            {"stackSize", stackArr.size()},
+            {"undoStackSize", activeUndos.size()},
+            {"stackSize", activeUndos.size()},
             {"history", history}
         });
     });
 
-    // 12. POST /api/prediction (What-If Simulation)
+    // 16. GET /api/risk/<studentId> (Protected: Student privacy check)
+    CROW_ROUTE(app, "/api/risk/<string>")
+    ([&](const crow::request& req, std::string studentId) {
+        auto claims = authenticateRequest(req);
+        if (claims.has_value() && !checkStudentAccess(claims, studentId)) {
+            return makeJsonResponse(403, {{"error", "Forbidden: You are only permitted to view your own risk predictions"}});
+        }
+
+        double threshold = 75.0;
+        if (req.url_params.get("threshold")) {
+            try { threshold = std::stod(req.url_params.get("threshold")); } catch (...) {}
+        }
+
+        auto profOpt = service.getStudentProfile(studentId, threshold);
+        if (!profOpt) {
+            return makeJsonResponse(404, {{"error", "Student profile not found"}});
+        }
+
+        const auto& p = *profOpt;
+        auto studentRecords = repo.findRecordsByStudent(studentId);
+        std::vector<attendance::models::AttendanceStatus> statuses;
+        for (const auto& r : studentRecords) {
+            statuses.push_back(r.status);
+        }
+
+        auto prediction = attendance::ml::RiskPredictor::predict(statuses, threshold);
+
+        return makeJsonResponse(200, {
+            {"studentId", studentId},
+            {"studentName", p.name},
+            {"rollNumber", p.rollNumber},
+            {"attendancePercentage", p.overallPercentage},
+            {"threshold", threshold},
+            {"prediction", {
+                {"category", attendance::models::riskToString(prediction.riskCategory)},
+                {"score", prediction.riskScore},
+                {"confidence", prediction.confidence},
+                {"recommendation", prediction.recommendation},
+                {"contributingFactors", prediction.contributingFactors},
+                {"methodology", prediction.methodology}
+            }}
+        });
+    });
+
+    // 17. POST /api/prediction (What-If Simulation; Protected)
     CROW_ROUTE(app, "/api/prediction")
         .methods("POST"_method)
     ([&](const crow::request& req) {
@@ -659,6 +985,11 @@ int main(int argc, char* argv[]) {
             int attendNext = body.value("attendNext", 5);
             int missNext = body.value("missNext", 0);
             double threshold = body.value("threshold", 75.0);
+
+            auto claims = authenticateRequest(req);
+            if (claims.has_value() && !studentId.empty() && !checkStudentAccess(claims, studentId)) {
+                return makeJsonResponse(403, {{"error", "Forbidden: Students can only run simulations for themselves"}});
+            }
 
             auto profOpt = service.getStudentProfile(studentId, threshold);
             if (!profOpt) {
@@ -699,8 +1030,10 @@ int main(int argc, char* argv[]) {
                 {"projectedRisk", {
                     {"category", attendance::models::riskToString(projectedRisk.riskCategory)},
                     {"score", projectedRisk.riskScore},
+                    {"confidence", projectedRisk.confidence},
                     {"recommendation", projectedRisk.recommendation},
-                    {"contributingFactors", projectedRisk.contributingFactors}
+                    {"contributingFactors", projectedRisk.contributingFactors},
+                    {"methodology", projectedRisk.methodology}
                 }}
             });
         } catch (...) {
@@ -708,245 +1041,181 @@ int main(int argc, char* argv[]) {
         }
     });
 
-    // 13. GET /api/dsa/benchmark
+    // 18. GET /api/dsa/benchmark
     CROW_ROUTE(app, "/api/dsa/benchmark")
-    ([&]() {
-        auto all = service.getAllStudentProfiles(75.0);
-        const auto& profiles = all.profiles;
+    ([&](const crow::request& req) {
+        auto allStudents = repo.findAllStudents();
+        std::vector<attendance::models::StudentAttendanceProfile> profiles;
+        for (const auto& s : allStudents) {
+            auto profOpt = service.getStudentProfile(s.id, 75.0);
+            if (profOpt) profiles.push_back(*profOpt);
+        }
 
-        // Sorting comparison
-        auto compAsc = [](const attendance::models::StudentAttendanceProfile& a, const attendance::models::StudentAttendanceProfile& b) {
-            return a.overallPercentage < b.overallPercentage;
-        };
-
-        auto ms = attendance::algorithms::mergeSortWithMetrics(profiles, compAsc);
-        auto qs = attendance::algorithms::quickSortWithMetrics(profiles, compAsc);
-
-        // Native std::sort benchmark
-        std::vector<attendance::models::StudentAttendanceProfile> nativeArr = profiles;
-        auto nStart = std::chrono::high_resolution_clock::now();
-        std::sort(nativeArr.begin(), nativeArr.end(), compAsc);
-        auto nEnd = std::chrono::high_resolution_clock::now();
-        long long nativeUs = std::chrono::duration_cast<std::chrono::microseconds>(nEnd - nStart).count();
-
-        // Searching comparison on roll numbers
-        std::string target = "2024CS019";
-        auto linSearch = attendance::algorithms::linearSearch(
+        // Sorting Benchmark
+        auto mergeSortRes = attendance::algorithms::mergeSortWithMetrics(
             profiles,
-            [&](const attendance::models::StudentAttendanceProfile& p) { return p.rollNumber == target; },
-            [](const attendance::models::StudentAttendanceProfile& p) { return p.rollNumber; }
+            [](const auto& a, const auto& b) { return a.overallPercentage < b.overallPercentage; }
         );
 
-        // Roll number sorted list for binary search
-        auto sortedByRoll = profiles;
-        std::sort(sortedByRoll.begin(), sortedByRoll.end(), [](const auto& a, const auto& b) {
-            return a.rollNumber < b.rollNumber;
-        });
-        auto binSearch = attendance::algorithms::binarySearch(
-            sortedByRoll,
-            target,
-            [](const attendance::models::StudentAttendanceProfile& p) { return p.rollNumber; }
+        auto quickSortRes = attendance::algorithms::quickSortWithMetrics(
+            profiles,
+            [](const auto& a, const auto& b) { return a.overallPercentage < b.overallPercentage; }
         );
 
-        // HashMap vs Array Lookup speedup benchmark
-        attendance::dsa::StudentHashMap<std::string, std::string> benchMap;
+        // Searching Benchmark
+        auto sortedProfiles = mergeSortRes.sorted;
+        std::string targetKey = sortedProfiles.empty() ? "" : sortedProfiles[sortedProfiles.size() / 2].rollNumber;
+
+        auto linearSearchRes = attendance::algorithms::linearSearch(
+            profiles,
+            [&targetKey](const auto& p) { return p.rollNumber == targetKey; },
+            [](const auto& p) { return p.rollNumber; }
+        );
+
+        auto binarySearchRes = attendance::algorithms::binarySearch(
+            sortedProfiles,
+            targetKey,
+            [](const auto& p) { return p.rollNumber; }
+        );
+
+        // StudentHashMap amortized lookup diagnostics
+        attendance::dsa::StudentHashMap<std::string, attendance::models::StudentAttendanceProfile> map;
         for (const auto& p : profiles) {
-            benchMap.set(p.rollNumber, p.name);
+            map.set(p.rollNumber, p);
         }
+        json lookupBench = map.getDiagnostics();
+        lookupBench["structure"] = "StudentHashMap";
+        lookupBench["hashAlgorithm"] = "djb2 polynomial rolling hash";
+        lookupBench["amortizedTimeComplexity"] = "O(1)";
 
-        int iterations = 10000;
-        auto mapStart = std::chrono::high_resolution_clock::now();
-        std::string outVal;
-        for (int i = 0; i < iterations; i++) {
-            benchMap.get("2024CS015", outVal);
-        }
-        auto mapEnd = std::chrono::high_resolution_clock::now();
-        double mapAvgUs = std::max(0.01, std::chrono::duration_cast<std::chrono::microseconds>(mapEnd - mapStart).count() / static_cast<double>(iterations));
-
-        auto arrStart = std::chrono::high_resolution_clock::now();
-        for (int i = 0; i < iterations; i++) {
-            for (const auto& p : profiles) {
-                if (p.rollNumber == "2024CS015") break;
-            }
-        }
-        auto arrEnd = std::chrono::high_resolution_clock::now();
-        double arrAvgUs = std::max(0.05, std::chrono::duration_cast<std::chrono::microseconds>(arrEnd - arrStart).count() / static_cast<double>(iterations));
-
-        json linTrace = json::array();
-        for (const auto& t : linSearch.trace) {
-            linTrace.push_back({
-                {"index", t.index},
-                {"valueExamined", t.valueExamined},
-                {"isMatch", t.isMatch},
-                {"actionTaken", t.actionTaken}
-            });
-        }
-
-        json binTrace = json::array();
-        for (const auto& t : binSearch.trace) {
-            binTrace.push_back({
-                {"index", t.index},
-                {"low", t.low},
-                {"mid", t.mid},
-                {"high", t.high},
-                {"valueExamined", t.valueExamined},
-                {"isMatch", t.isMatch},
-                {"actionTaken", t.actionTaken}
-            });
-        }
-
-        return makeJsonResponse(200, {
+        return makeJsonResponse(200, json{
             {"success", true},
             {"datasetSize", profiles.size()},
             {"sorting", {
                 {"mergeSort", {
-                    {"comparisons", ms.comparisons},
-                    {"swaps", ms.swaps},
-                    {"durationMicroseconds", std::max(1LL, ms.durationMicroseconds)},
+                    {"algorithm", "Merge Sort"},
+                    {"durationMicroseconds", mergeSortRes.durationMicroseconds},
+                    {"comparisons", mergeSortRes.comparisons},
+                    {"swaps", mergeSortRes.swaps},
                     {"timeComplexity", "O(n log n)"},
-                    {"spaceComplexity", "O(n)"},
-                    {"isStable", true}
+                    {"spaceComplexity", "O(n)"}
                 }},
                 {"quickSort", {
-                    {"comparisons", qs.comparisons},
-                    {"swaps", qs.swaps},
-                    {"durationMicroseconds", std::max(1LL, qs.durationMicroseconds)},
+                    {"algorithm", "Quick Sort"},
+                    {"durationMicroseconds", quickSortRes.durationMicroseconds},
+                    {"comparisons", quickSortRes.comparisons},
+                    {"swaps", quickSortRes.swaps},
                     {"timeComplexity", "O(n log n) avg, O(n^2) worst"},
-                    {"spaceComplexity", "O(log n)"},
-                    {"isStable", false}
-                }},
-                {"nativeSort", {
-                    {"durationMicroseconds", std::max(1LL, nativeUs)},
-                    {"timeComplexity", "O(n log n) (Introsort)"},
-                    {"spaceComplexity", "O(log n)"},
-                    {"isStable", false}
+                    {"spaceComplexity", "O(log n)"}
                 }}
             }},
             {"searching", {
-                {"target", target},
                 {"linearSearch", {
-                    {"found", linSearch.found},
-                    {"index", linSearch.index},
-                    {"stepsCount", linSearch.stepsCount},
-                    {"timeMicroseconds", linSearch.timeMicroseconds},
-                    {"timeComplexity", linSearch.timeComplexity},
-                    {"trace", linTrace}
+                    {"algorithm", linearSearchRes.algorithm},
+                    {"found", linearSearchRes.found},
+                    {"stepsCount", linearSearchRes.stepsCount},
+                    {"timeMicroseconds", linearSearchRes.timeMicroseconds},
+                    {"timeComplexity", linearSearchRes.timeComplexity}
                 }},
                 {"binarySearch", {
-                    {"found", binSearch.found},
-                    {"index", binSearch.index},
-                    {"stepsCount", binSearch.stepsCount},
-                    {"timeMicroseconds", binSearch.timeMicroseconds},
-                    {"timeComplexity", binSearch.timeComplexity},
-                    {"trace", binTrace}
+                    {"algorithm", binarySearchRes.algorithm},
+                    {"found", binarySearchRes.found},
+                    {"stepsCount", binarySearchRes.stepsCount},
+                    {"timeMicroseconds", binarySearchRes.timeMicroseconds},
+                    {"timeComplexity", binarySearchRes.timeComplexity}
                 }}
             }},
-            {"lookupBenchmark", {
-                {"iterations", iterations},
-                {"hashMapAverageUs", mapAvgUs},
-                {"arrayScanAverageUs", arrAvgUs},
-                {"speedupFactor", std::max(1, static_cast<int>(arrAvgUs / mapAvgUs))},
-                {"hashMapDiagnostics", all.hashMap.getDiagnostics()}
-            }}
+            {"lookupBenchmark", lookupBench}
         });
     });
 
-    // 14. GET /api/dsa/graph
+    // 19. GET /api/dsa/graph
     CROW_ROUTE(app, "/api/dsa/graph")
-    ([&]() {
+    ([&](const crow::request& req) {
         attendance::dsa::AttendanceGraph graph;
+
         auto facultyList = repo.findAllFaculty();
-        auto subjectList = repo.findAllSubjects();
-        auto studentList = repo.findAllStudents();
-
-        std::string rootFacultyId;
         for (const auto& f : facultyList) {
-            std::string fid = "fac_" + f.id;
-            if (rootFacultyId.empty()) rootFacultyId = fid;
-            graph.addNode({fid, f.name, "FACULTY", {{"employeeId", f.employeeId}, {"department", f.department}}});
+            graph.addNode({
+                "FACULTY_" + f.id,
+                f.name,
+                "FACULTY",
+                {{"department", f.department}, {"email", f.email}}
+            });
         }
 
-        for (const auto& s : subjectList) {
-            std::string sid = "sub_" + s.id;
-            graph.addNode({sid, s.code + ": " + s.name, "SUBJECT", {{"code", s.code}, {"credits", s.credits}}});
-            graph.addEdge({"fac_" + s.facultyId, sid, "TEACHES"});
-        }
+        auto subjectList = repo.findAllSubjects();
+        for (const auto& sub : subjectList) {
+            graph.addNode({
+                "SUBJECT_" + sub.id,
+                sub.code + " - " + sub.name,
+                "SUBJECT",
+                {{"code", sub.code}, {"credits", sub.credits}}
+            });
 
-        for (const auto& st : studentList) {
-            std::string stid = "stu_" + st.id;
-            graph.addNode({stid, st.rollNumber + ": " + st.name, "STUDENT", {{"roll", st.rollNumber}}});
-            auto enrolledSubs = repo.findEnrolledSubjectIds(st.id);
-            for (const auto& subId : enrolledSubs) {
-                graph.addEdge({"sub_" + subId, stid, "ENROLLED_IN"});
+            if (!sub.facultyId.empty()) {
+                graph.addEdge({"FACULTY_" + sub.facultyId, "SUBJECT_" + sub.id, "TEACHES"}, true);
             }
         }
 
-        auto bfsRes = graph.bfs(rootFacultyId);
-        auto dfsRes = graph.dfs(rootFacultyId);
-
-        json nodesArr = json::array();
-        for (const auto& [nid, n] : graph.getNodes()) {
-            nodesArr.push_back({
-                {"id", n.id},
-                {"label", n.label},
-                {"type", n.type},
-                {"metadata", n.metadata}
+        auto studentList = repo.findAllStudents();
+        for (const auto& stu : studentList) {
+            graph.addNode({
+                "STUDENT_" + stu.id,
+                stu.name + " (" + stu.rollNumber + ")",
+                "STUDENT",
+                {{"rollNumber", stu.rollNumber}, {"department", stu.department}}
             });
+
+            auto enrolledSubIds = repo.findEnrolledSubjectIds(stu.id);
+            for (const auto& subId : enrolledSubIds) {
+                graph.addEdge({"SUBJECT_" + subId, "STUDENT_" + stu.id, "ENROLLED_IN"}, true);
+            }
         }
 
-        json edgesArr = json::array();
-        for (const auto& e : graph.getEdges()) {
-            edgesArr.push_back({
-                {"source", e.source},
-                {"target", e.target},
-                {"relationship", e.relationship}
-            });
+        std::string startNode = req.url_params.get("start") ? req.url_params.get("start") : "";
+        if (startNode.empty() && !facultyList.empty()) {
+            startNode = "FACULTY_" + facultyList[0].id;
         }
+
+        auto bfsResult = graph.bfs(startNode);
+        auto dfsResult = graph.dfs(startNode);
 
         json levelsJson = json::object();
-        for (const auto& [k, v] : bfsRes.levels) {
+        for (const auto& [k, v] : bfsResult.levels) {
             levelsJson[k] = v;
         }
 
-        return makeJsonResponse(200, {
+        auto graphJson = graph.toJson();
+
+        return makeJsonResponse(200, json{
             {"success", true},
-            {"startNode", rootFacultyId},
-            {"graph", {
-                {"nodes", nodesArr},
-                {"edges", edgesArr}
-            }},
+            {"startNode", startNode},
+            {"graph", graphJson},
             {"traversals", {
                 {"bfs", {
-                    {"algorithm", "Breadth-First Search (BFS)"},
-                    {"startNode", rootFacultyId},
-                    {"traversalOrder", bfsRes.order},
-                    {"nodesVisited", bfsRes.nodesVisited},
-                    {"levels", levelsJson},
-                    {"timeComplexity", "O(V + E)"},
-                    {"spaceComplexity", "O(V)"},
-                    {"dataStructureUsed", "Queue (FIFO)"}
+                    {"order", bfsResult.order},
+                    {"nodesVisited", bfsResult.nodesVisited},
+                    {"levels", levelsJson}
                 }},
                 {"dfs", {
-                    {"algorithm", "Depth-First Search (DFS)"},
-                    {"startNode", rootFacultyId},
-                    {"traversalOrder", dfsRes.order},
-                    {"nodesVisited", dfsRes.nodesVisited},
-                    {"timeComplexity", "O(V + E)"},
-                    {"spaceComplexity", "O(V)"},
-                    {"dataStructureUsed", "Stack / Recursion (LIFO)"}
+                    {"order", dfsResult.order},
+                    {"nodesVisited", dfsResult.nodesVisited}
                 }}
             }}
         });
     });
 
-    std::cout << "========================================================\n"
-              << "🚀 AI Attendance Risk Predictor — C++ Backend (Crow)\n"
-              << "========================================================\n"
-              << "Listening on port " << port << " ...\n"
-              << "Database connected: " << dbPath << "\n"
-              << "All REST APIs and DSA benchmarks online!\n"
-              << "========================================================" << std::endl;
+    std::cout << "========================================================\n";
+    std::cout << "🚀 AI Attendance Risk Predictor — C++ Backend (Crow)\n";
+    std::cout << "========================================================\n";
+    std::cout << "Listening on port " << port << " ...\n";
+    std::cout << "Database connected: " << dbPath << "\n";
+    std::cout << "Security: Bcrypt Auth + HS256 Signed JWT + RBAC Enforced\n";
+    std::cout << "All REST APIs and DSA benchmarks online!\n";
+    std::cout << "========================================================\n";
 
     app.port(port).multithreaded().run();
+
     return 0;
 }

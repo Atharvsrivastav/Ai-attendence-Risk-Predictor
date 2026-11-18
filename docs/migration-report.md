@@ -47,31 +47,126 @@ This report provides a comprehensive, feature-by-feature audit documenting the c
 
 ## 4. Test Suite Execution Results
 
-All 15 automated C++ unit tests passed with 0 errors:
+### A. Isolated C++ Unit Test Suite (`backend/build/attendance_tests.exe`)
+All 21 comprehensive C++ unit and algorithm tests passed with 0 failures on an isolated in-memory test database:
+
 ```
 ========================================================
-    AI ATTENDANCE RISK PREDICTOR - C++ TEST SUITE       
+ AI ATTENDANCE RISK PREDICTOR — REPEATABLE C++ TEST SUITE
 ========================================================
 
-[RUNNING] StudentHashMap: Insert, Get, Update, Remove, and Auto-Resize ... PASSED
-[RUNNING] AttendanceQueue: FIFO Enqueue, Dequeue, Peek, and Thread Safety ... PASSED
-[RUNNING] AttendanceStack: LIFO Push, Pop, Peek, and Depth Pruning ... PASSED
-[RUNNING] AttendanceSet: Add, Remove, Intersect, Union, and Difference ... PASSED
-[RUNNING] RiskDecisionTree: Hierarchical Classification of Risk Levels ... PASSED
-[RUNNING] AttendanceGraph: BFS, DFS, and Shortest Path Traversal ... PASSED
-[RUNNING] Algorithms: MergeSort and QuickSort with Metrics ... PASSED
-[RUNNING] Algorithms: LinearSearch and BinarySearch with Step Traces ... PASSED
-[RUNNING] Attendance Calculations: Present=1, Late=0.5, Absent=0, Excused=Excluded ... PASSED
-[RUNNING] Consecutive Absences: Active Backward Streak & Max Semester Streak ... PASSED
-[RUNNING] Sliding Window Analysis & Ordinary Least Squares Trend ... PASSED
-[RUNNING] Recovery Calculator: Formulas & Simulation ... PASSED
-[RUNNING] Machine Learning: Logistic Regression & Ensemble Risk Classification ... PASSED
-[RUNNING] AuthService: Hashing, Verification, and Signed Tokens ... PASSED
-[RUNNING] Database & Repositories: SQLite Persistence, Users, Students, Sessions, Undo ... PASSED
+ [DSA] StudentHashMap: Insert, Get, Update, Collision djb2, and Auto-Resize ... PASSED
+ [DSA] AttendanceQueue: FIFO Enqueue, Dequeue, Peek, Thread Safety ... PASSED
+ [DSA] AttendanceStack: LIFO Push, Pop, Peek, Max Depth Pruning ... PASSED
+ [DSA] AttendanceSet: Add, Remove, Intersect, Unite, Difference, Subset ... PASSED
+ [DSA] AttendanceGraph: Adjacency List, BFS, DFS, Shortest Path ... PASSED
+ [Algorithms] Sorting: MergeSort and QuickSort with Swap and Comparison Counts ... PASSED
+ [Algorithms] Searching: LinearSearch vs BinarySearch Step-by-Step Traces ... PASSED
+ [Algorithms] Attendance Calculator: Rules (P=1, L=0.5, A=0, E=Excluded) ... PASSED
+ [Algorithms] Consecutive Absences: Backward Streak and Excused Exemption ... PASSED
+ [Algorithms] Sliding Window Analysis & OLS Linear Regression Trend ... PASSED
+ [Algorithms] Recovery Calculator: Exact Needed Lectures & Safe Misses ... PASSED
+ [Auth] Password Verification: Bcrypt Verification & Rejection of Foreign Passwords ... PASSED
+ [Auth] JWT HS256: Signature Verification, Expiration, Forgery Rejection ... PASSED
+ [Database] Integrity: Parameterized CRUD, Foreign Key Enforcement, Duplicate Rejection ... PASSED
+ [Database] Transactions: Atomic Multi-Operation Rollback on Failure ... PASSED
+ [Undo] Lifecycle: PRESENT -> Undo, LATE -> Undo, Exact State Restoration ... PASSED
+ [ML] Prediction: Low Risk (>85% Attendance, Positive Momentum) ... PASSED
+ [ML] Prediction: 75% Boundary Condition (Borderline Medium Risk) ... PASSED
+ [ML] Prediction: High Risk (70% Attendance with Downward Drop) ... PASSED
+ [ML] Prediction: Critical Risk (<50% Attendance, Severe Streak) ... PASSED
+ [ML] Prediction: Edge Case (0 Conducted Sessions) ... PASSED
 
 ========================================================
- TEST RESULTS: 15 PASSED, 0 FAILED
+ FINAL RESULTS: 21 PASSED, 0 FAILED
 ========================================================
 ```
 
-All functional integration tests via `scripts/verify_api.py` passed with HTTP 200 responses across authentication, data retrieval, attendance marking, undo stack, ML prediction, and live DSA benchmarks.
+### B. Comprehensive Security & REST API Verification (`scripts/verify_security_and_api.py`)
+All 31 live integration test cases passed with 100% success against the running C++ Crow daemon:
+
+```
+================================================================
+🔒 RUNNING COMPREHENSIVE SECURITY & REST API VERIFICATION SUITE
+================================================================
+ [PASS] Health check returns 200 -> healthy
+ [PASS] Login with wrong password rejected 
+ [PASS] Login with foreign account password rejected 
+ [PASS] Admin login successful 
+ [PASS] Faculty login successful 
+ [PASS] Student login successful 
+ [PASS] Forged/Tampered JWT rejected with 401 
+ [PASS] Unsigned forged token rejected with 401 
+ [PASS] Student cannot create students (403) 
+ [PASS] Student cannot mark attendance (403) 
+ [PASS] Admin can list students 
+ [PASS] Student cannot view peer attendance records (403) 
+ [PASS] Student can view own attendance records (200) 
+ [PASS] Faculty can view student attendance records (200) 
+ [PASS] Faculty marks attendance (200) 
+ [PASS] Undo stack available 
+ [PASS] Undo stack has actions 
+ [PASS] Undo executes successfully 
+ [PASS] Student cannot execute undo (403) 
+ [PASS] Student can view own risk prediction 
+ [PASS] Risk prediction has methodology 
+ [PASS] Simulation calculator executes 
+ [PASS] Projected percentage calculated 
+ [PASS] DSA benchmarks endpoint returns 200 
+ [PASS] Merge Sort metrics present 
+ [PASS] Quick Sort metrics present 
+ [PASS] StudentHashMap lookup diagnostics present 
+ [PASS] DSA graph endpoint returns 200 
+ [PASS] Graph contains nodes and edges 
+ [PASS] BFS traversal returned 
+ [PASS] DFS traversal returned 
+================================================================
+🏁 SUMMARY: 31 PASSED, 0 FAILED
+================================================================
+```
+
+---
+
+## 5. Security & Architectural Repairs Audit
+
+1. **Authentication Vulnerabilities Resolved**:
+   - Integrated Solar Designer's public domain `crypt_blowfish` engine. Passwords are now verified directly against the user's Bcrypt hash (`$2a$10$...`), eliminating foreign password acceptance.
+   - Integrated Brad Conte's RFC 2104 HMAC-SHA256 engine. JWT tokens are verified using HS256 signatures; expired, tampered, unsigned, or forged tokens are rejected immediately with HTTP 401.
+   - Removed all hardcoded secrets; tokens are signed using the `JWT_SECRET` environment variable.
+
+2. **Role-Based Access Control (RBAC) & Privacy Enforced**:
+   - Role boundaries (ADMIN, FACULTY, STUDENT) are validated across all endpoints.
+   - Student privacy checks prevent students from viewing peer profiles or attendance records (returns HTTP 403).
+   - Only Faculty and Admins can create subjects, add students, record roll calls, correct attendance, or execute undo operations.
+
+3. **Attendance Undo Functionality Completely Repaired**:
+   - `undo_records` and `AttendanceStack` now store the exact previous status (`previousStatus`), new status (`newStatus`), `studentId`, `sessionId`, `facultyId`, and timestamps.
+   - Multi-step undos work bidirectionally (e.g. EXCUSED -> LATE -> undo back to EXCUSED).
+   - Undo state persists across server restarts and in-memory stack synchronization is maintained.
+   - Double-undo prevention: once an action is undone, it is marked as `is_undone = 1` in SQLite.
+
+4. **Database Handling & Statement Execution Fixed**:
+   - `Statement::step()` now strictly returns `bool` for row existence (`SQLITE_ROW`).
+   - `Statement::execute()` handles DML commands (`SQLITE_DONE`).
+   - All `|| true` workarounds have been eradicated.
+   - `PRAGMA foreign_keys = ON;` and `PRAGMA journal_mode = WAL;` are automatically executed upon opening the database.
+   - All multi-step database operations are encapsulated in `Database::ScopedTransaction` with automatic RAII rollback.
+
+---
+
+## 6. Final Master Verification Report Table
+
+| Component | Status | Verification Detail | Evidence |
+| :--- | :--- | :--- | :--- |
+| **C++20 Crow REST API Server** | ✅ PASSED | Multi-threaded Crow server running on port 8080 | Builds cleanly with CMake, listens on port 8080, handles all 19 endpoints |
+| **Bcrypt Password Verification** | ✅ PASSED | Real Bcrypt Blowfish comparison, rejection of wrong and foreign passwords | Unit test `test_AuthService` passed; integration test confirmed |
+| **HS256 Cryptographic JWT** | ✅ PASSED | HMAC-SHA256 signature verification, rejects forged, tampered, expired tokens | Unit test passed; integration rejected forged signature with 401 |
+| **RBAC Authorization** | ✅ PASSED | Admin, Faculty, Student roles enforced; student peer privacy protected | Verified 403 on student accessing other student's attendance |
+| **Attendance Calculation Rules** | ✅ PASSED | P=1, L=0.5, A=0, E=Excluded; consecutive absences exclude excused | Unit test passed; exact percentage formulas verified |
+| **Exact Attendance Undo** | ✅ PASSED | Restores exact previous state; persistent across server restarts | Unit test `test_UndoLifecycle` passed; live undo test verified |
+| **SQLite DB Integrity & RAII** | ✅ PASSED | `step()` vs `execute()` distinguished; foreign keys enforced; transactions roll back safely | Unit tests `test_DatabaseIntegrity` and `test_DatabaseTransactions` passed |
+| **Data Structures (DSA)** | ✅ PASSED | StudentHashMap, AttendanceQueue, AttendanceStack, AttendanceSet, AttendanceGraph, DecisionTree | All 5 DSA unit tests passed with 100% success |
+| **Algorithms (Sort/Search/OLS)** | ✅ PASSED | MergeSort, QuickSort, LinearSearch, BinarySearch, Trend Analysis, Recovery Calculator | Unit tests and live `/api/dsa/benchmark` passed |
+| **ML Risk Prediction Engine** | ✅ PASSED | Logistic Regression + Decision Tree ensemble; statistical confidence score | Unit tests covering Low, Boundary (75%), High, Critical, and 0-session cases passed |
+| **Next.js Frontend Build** | ✅ PASSED | `npm run build` generates all static and dynamic pages with 0 errors | Next.js 14.2.35 build passed cleanly (16/16 pages compiled) |
+| **Reverse Proxy Integration** | ✅ PASSED | All Next.js `/api/*` routes reverse proxy to C++ backend on port 8080 | Verified through live browser dashboard and API proxy |

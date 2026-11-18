@@ -15,8 +15,18 @@ include_directories(
 add_library(sqlite3 STATIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite3.c)
 target_include_directories(sqlite3 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
+# Compile Cryptographic Core (Bcrypt / crypt_blowfish & SHA256)
+add_library(crypto_core STATIC 
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/crypt_blowfish.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sha256.c
+)
+target_include_directories(crypto_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+
 # Common definitions
-add_definitions(-DASIO_STANDALONE -D_WIN32_WINNT=0x0601)
+add_definitions(-DASIO_STANDALONE)
+if(WIN32)
+    add_definitions(-D_WIN32_WINNT=0x0601)
+endif()
 
 set(CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/database/Database.cpp
@@ -31,21 +41,39 @@ add_executable(attendance_server
     ${CORE_SOURCES}
 )
 
-target_link_libraries(attendance_server PRIVATE
-    sqlite3
-    ws2_32
-    mswsock
-)
+if(WIN32)
+    target_link_libraries(attendance_server PRIVATE
+        sqlite3
+        crypto_core
+        ws2_32
+        mswsock
+    )
+else()
+    target_link_libraries(attendance_server PRIVATE
+        sqlite3
+        crypto_core
+        pthread
+    )
+endif()
 
-# Test Executable
+# Automated Test Executable
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp)
     add_executable(attendance_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp
         ${CORE_SOURCES}
     )
-    target_link_libraries(attendance_tests PRIVATE
-        sqlite3
-        ws2_32
-        mswsock
-    )
+    if(WIN32)
+        target_link_libraries(attendance_tests PRIVATE
+            sqlite3
+            crypto_core
+            ws2_32
+            mswsock
+        )
+    else()
+        target_link_libraries(attendance_tests PRIVATE
+            sqlite3
+            crypto_core
+            pthread
+        )
+    endif()
 endif()

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import {
   Users,
   AlertTriangle,
@@ -41,6 +41,7 @@ import {
 export default function FacultyDashboard() {
   const [threshold, setThreshold] = useState<number>(75);
   const [students, setStudents] = useState<any[]>([]);
+  const [allStudents, setAllStudents] = useState<any[]>([]);
   const [analytics, setAnalytics] = useState<any>(null);
   const [subjects, setSubjects] = useState<any[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -70,11 +71,7 @@ export default function FacultyDashboard() {
   const [attendanceInputs, setAttendanceInputs] = useState<Record<string, string>>({});
   const [submittingAttendance, setSubmittingAttendance] = useState(false);
 
-  useEffect(() => {
-    fetchData();
-  }, [threshold, sortBy, sortOrder, sortAlgorithm, filterRisk, belowThresholdOnly]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       setLoading(true);
       const query = new URLSearchParams({
@@ -84,7 +81,7 @@ export default function FacultyDashboard() {
         sortAlgorithm,
         ...(filterRisk ? { filterRisk } : {}),
         ...(belowThresholdOnly ? { belowThreshold: "true" } : {}),
-        ...(search ? { search } : {}),
+        ...(search.trim() ? { search: search.trim() } : {}),
       });
 
       const [stuRes, anaRes, subRes] = await Promise.all([
@@ -95,8 +92,16 @@ export default function FacultyDashboard() {
 
       if (stuRes.ok) {
         const stuData = await stuRes.json();
-        setStudents(stuData.students || []);
+        const studentList = stuData.students || [];
+        setStudents(studentList);
         setDsaMetrics(stuData.dsaMetrics || null);
+
+        // Keep allStudents populated for full roll call sessions
+        if (!search.trim() && !filterRisk && !belowThresholdOnly) {
+          setAllStudents(studentList);
+        } else {
+          setAllStudents((prev) => (prev.length === 0 ? studentList : prev));
+        }
       }
 
       if (anaRes.ok) {
@@ -108,8 +113,8 @@ export default function FacultyDashboard() {
       if (subRes.ok) {
         const subData = await subRes.json();
         setSubjects(subData.subjects || []);
-        if (subData.subjects?.length > 0 && !selectedSubjectId) {
-          setSelectedSubjectId(subData.subjects[0].id);
+        if (subData.subjects?.length > 0) {
+          setSelectedSubjectId((prev) => prev || subData.subjects[0].id);
         }
       }
     } catch (err) {
@@ -117,7 +122,14 @@ export default function FacultyDashboard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [threshold, sortBy, sortOrder, sortAlgorithm, filterRisk, belowThresholdOnly, search]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetchData();
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [fetchData]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -150,7 +162,8 @@ export default function FacultyDashboard() {
 
     try {
       setSubmittingAttendance(true);
-      const records = students.map((s) => ({
+      const rollCallStudents = allStudents.length > 0 ? allStudents : students;
+      const records = rollCallStudents.map((s) => ({
         studentId: s.studentId,
         status: attendanceInputs[s.studentId] || "PRESENT",
       }));
@@ -812,58 +825,93 @@ export default function FacultyDashboard() {
               </div>
 
               {/* Student Roll Call Toggles */}
-              <div className="space-y-2">
-                <p className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                  Class Roll Call ({students.length} Students)
-                </p>
-                <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-60 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-xl p-2">
-                  {students.map((stu) => {
-                    const currentStatus = attendanceInputs[stu.studentId] || "PRESENT";
-
-                    return (
-                      <div
-                        key={stu.studentId}
-                        className="py-2 px-2 flex items-center justify-between text-xs"
-                      >
-                        <div>
-                          <span className="font-semibold text-slate-900 dark:text-slate-100">
-                            {stu.name}
-                          </span>
-                          <span className="ml-2 font-mono text-[10px] text-slate-400">
-                            {stu.rollNumber}
-                          </span>
-                        </div>
-
-                        <div className="flex items-center gap-1">
-                          {(["PRESENT", "LATE", "ABSENT"] as const).map((stat) => (
-                            <button
-                              key={stat}
-                              type="button"
-                              onClick={() =>
-                                setAttendanceInputs((prev) => ({
-                                  ...prev,
-                                  [stu.studentId]: stat,
-                                }))
-                              }
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold transition-colors ${
-                                currentStatus === stat
-                                  ? stat === "PRESENT"
-                                    ? "bg-emerald-600 text-white"
-                                    : stat === "LATE"
-                                    ? "bg-yellow-500 text-white"
-                                    : "bg-red-600 text-white"
-                                  : "bg-slate-100 dark:bg-slate-800 text-slate-500 hover:bg-slate-200"
-                              }`}
-                            >
-                              {stat}
-                            </button>
-                          ))}
-                        </div>
+              {(() => {
+                const rollCallStudents = allStudents.length > 0 ? allStudents : students;
+                return (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                        Class Roll Call ({rollCallStudents.length} Students)
+                      </p>
+                      <div className="flex items-center gap-1.5 text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const inputs: Record<string, string> = {};
+                            rollCallStudents.forEach((s) => {
+                              inputs[s.studentId] = "PRESENT";
+                            });
+                            setAttendanceInputs(inputs);
+                          }}
+                          className="px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-semibold hover:bg-emerald-100 dark:hover:bg-emerald-900 transition-colors"
+                        >
+                          All Present
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const inputs: Record<string, string> = {};
+                            rollCallStudents.forEach((s) => {
+                              inputs[s.studentId] = "ABSENT";
+                            });
+                            setAttendanceInputs(inputs);
+                          }}
+                          className="px-2 py-0.5 rounded bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-semibold hover:bg-rose-100 dark:hover:bg-rose-900 transition-colors"
+                        >
+                          All Absent
+                        </button>
                       </div>
-                    );
-                  })}
-                </div>
-              </div>
+                    </div>
+                    <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-60 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-xl p-2">
+                      {rollCallStudents.map((stu) => {
+                        const currentStatus = attendanceInputs[stu.studentId] || "PRESENT";
+
+                        return (
+                          <div
+                            key={stu.studentId}
+                            className="py-2 px-2 flex items-center justify-between text-xs"
+                          >
+                            <div>
+                              <span className="font-semibold text-slate-900 dark:text-slate-100">
+                                {stu.name}
+                              </span>
+                              <span className="ml-2 font-mono text-[10px] text-slate-400">
+                                {stu.rollNumber}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-1">
+                              {(["PRESENT", "LATE", "ABSENT"] as const).map((stat) => (
+                                <button
+                                  key={stat}
+                                  type="button"
+                                  onClick={() =>
+                                    setAttendanceInputs((prev) => ({
+                                      ...prev,
+                                      [stu.studentId]: stat,
+                                    }))
+                                  }
+                                  className={`px-2 py-0.5 rounded text-[10px] font-bold transition-colors ${
+                                    currentStatus === stat
+                                      ? stat === "PRESENT"
+                                        ? "bg-emerald-600 text-white"
+                                        : stat === "LATE"
+                                        ? "bg-yellow-500 text-white"
+                                        : "bg-red-600 text-white"
+                                      : "bg-slate-100 dark:bg-slate-800 text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-700"
+                                  }`}
+                                >
+                                  {stat}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-200 dark:border-slate-800">
                 <button

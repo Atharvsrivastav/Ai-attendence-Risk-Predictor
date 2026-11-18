@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   Shield,
   Users,
@@ -11,6 +12,8 @@ import {
   CheckCircle2,
   AlertTriangle,
   RotateCcw,
+  ArrowRight,
+  ExternalLink,
 } from "lucide-react";
 import RiskBadge from "@/components/RiskBadge";
 
@@ -242,6 +245,87 @@ export default function AdminPage() {
               </div>
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* University Debarment Watchlist (Defaulters & High-Risk Students) */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-5 w-5 text-amber-500" />
+            <h2 className="font-bold text-base text-slate-900 dark:text-slate-100">
+              Exam Debarment Watchlist (&lt;75% Attendance & High Risk Cohort)
+            </h2>
+          </div>
+          <span className="text-xs font-mono px-2.5 py-1 rounded-full bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-400 font-semibold border border-amber-200 dark:border-amber-800">
+            {students.filter((s) => s.overallPercentage < 75 || s.riskCategory === "CRITICAL" || s.riskCategory === "HIGH").length} Students Flagged
+          </span>
+        </div>
+
+        <p className="text-xs text-slate-500">
+          Statutory university regulations require minimum 75% attendance for end-semester examination clearance.
+        </p>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs text-left">
+            <thead className="bg-slate-50 dark:bg-slate-800 text-slate-500 font-semibold border-y border-slate-200 dark:border-slate-700">
+              <tr>
+                <th className="py-2.5 px-3">Roll Number</th>
+                <th className="py-2.5 px-3">Student Name</th>
+                <th className="py-2.5 px-3">Attendance %</th>
+                <th className="py-2.5 px-3">Consecutive Absences</th>
+                <th className="py-2.5 px-3">Classes to Recover</th>
+                <th className="py-2.5 px-3">Risk Assessment</th>
+                <th className="py-2.5 px-3 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              {students
+                .filter((s) => s.overallPercentage < 75 || s.riskCategory === "CRITICAL" || s.riskCategory === "HIGH")
+                .map((stu) => (
+                  <tr key={stu.studentId} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                    <td className="py-3 px-3 font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                      {stu.rollNumber}
+                    </td>
+                    <td className="py-3 px-3">
+                      <div className="font-semibold text-slate-900 dark:text-slate-100">{stu.name}</div>
+                      <div className="text-[11px] text-slate-400">{stu.email}</div>
+                    </td>
+                    <td className="py-3 px-3 font-mono font-bold">
+                      <span className={stu.overallPercentage < 75 ? "text-amber-600" : "text-emerald-600"}>
+                        {stu.overallPercentage}%
+                      </span>
+                    </td>
+                    <td className="py-3 px-3 font-mono">
+                      {stu.currentConsecutiveAbsences > 0 ? (
+                        <span className="text-red-600 font-semibold">{stu.currentConsecutiveAbsences} streak</span>
+                      ) : (
+                        <span className="text-slate-400">0</span>
+                      )}
+                    </td>
+                    <td className="py-3 px-3 font-mono">
+                      {stu.classesNeededToRecover > 0 ? (
+                        <span className="text-amber-600 font-semibold">+{stu.classesNeededToRecover} required</span>
+                      ) : (
+                        <span className="text-emerald-600">Eligible</span>
+                      )}
+                    </td>
+                    <td className="py-3 px-3">
+                      <RiskBadge category={stu.riskCategory} score={stu.riskScore} />
+                    </td>
+                    <td className="py-3 px-3 text-right">
+                      <Link
+                        href={`/student?id=${stu.studentId}`}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950 dark:hover:bg-indigo-900 text-indigo-600 dark:text-indigo-400 font-semibold text-[11px] transition-colors"
+                      >
+                        <span>Audit</span>
+                        <ArrowRight className="h-3 w-3" />
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

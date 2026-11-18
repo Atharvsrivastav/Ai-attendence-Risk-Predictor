@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, Suspense } from "react";
+import React, { useEffect, useState, useCallback, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   GraduationCap,
@@ -36,33 +36,27 @@ function StudentDashboardContent() {
   const [allStudents, setAllStudents] = useState<any[]>([]);
   const [selectedStudentId, setSelectedStudentId] = useState<string>(queryStudentId || "");
 
-  useEffect(() => {
-    fetchAllStudents();
-  }, []);
-
-  useEffect(() => {
-    fetchProfile(selectedStudentId);
-  }, [selectedStudentId, threshold]);
-
-  const fetchAllStudents = async () => {
+  const fetchAllStudents = useCallback(async () => {
     try {
       const res = await fetch("/api/students");
       if (res.ok) {
         const data = await res.json();
         const list = data.students || [];
         setAllStudents(list);
-        if (!selectedStudentId && list.length > 0) {
+        setSelectedStudentId((prev) => {
+          if (prev) return prev;
+          if (list.length === 0) return "";
           // Default to Rahul Verma (High Risk) for vivid demonstration
           const rahul = list.find((s: any) => s.rollNumber === "2024CS003");
-          setSelectedStudentId(rahul ? rahul.studentId : list[0].studentId);
-        }
+          return rahul ? rahul.studentId : list[0].studentId;
+        });
       }
     } catch (err) {
       console.error("Fetch all students error:", err);
     }
-  };
+  }, []);
 
-  const fetchProfile = async (targetId: string) => {
+  const fetchProfile = useCallback(async (targetId: string) => {
     if (!targetId) return;
     try {
       setLoading(true);
@@ -76,15 +70,9 @@ function StudentDashboardContent() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [threshold]);
 
-  useEffect(() => {
-    if (profile) {
-      runSimulation();
-    }
-  }, [attendNext, missNext, profile, threshold]);
-
-  const runSimulation = async () => {
+  const runSimulation = useCallback(async () => {
     if (!profile) return;
     try {
       const res = await fetch("/api/prediction", {
@@ -105,7 +93,21 @@ function StudentDashboardContent() {
     } catch (err) {
       console.error("Simulation error:", err);
     }
-  };
+  }, [profile, attendNext, missNext, threshold]);
+
+  useEffect(() => {
+    fetchAllStudents();
+  }, [fetchAllStudents]);
+
+  useEffect(() => {
+    fetchProfile(selectedStudentId);
+  }, [selectedStudentId, fetchProfile]);
+
+  useEffect(() => {
+    if (profile) {
+      runSimulation();
+    }
+  }, [profile, runSimulation]);
 
   if (loading && !profile) {
     return (

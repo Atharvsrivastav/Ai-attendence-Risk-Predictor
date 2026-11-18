@@ -15,6 +15,9 @@
 # Database
 prisma/*.db
 prisma/*.db-journal
+*.db-shm
+*.db-wal
+*.db-journal
 
 # Debug logs
 npm-debug.log*
@@ -29,4 +32,13 @@ Thumbs.db
 # TypeScript
 *.tsbuildinfo
 
+# C++ Build Output
+backend/build/
+*.exe
+*.o
+*.obj
+*.a
+
 .vercel
+.env*
+!.env.example

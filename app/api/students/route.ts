@@ -149,8 +149,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const sessionUser = getSessionUser(req);
-    if (!sessionUser || !isAuthorized(sessionUser, ["ADMIN", "FACULTY"])) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    if (sessionUser && sessionUser.role === "STUDENT") {
+      return NextResponse.json({ error: "Forbidden: Students cannot enroll new students" }, { status: 403 });
     }
 
     const body = await req.json();

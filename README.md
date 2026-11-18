@@ -98,10 +98,10 @@ cmake -B backend/build -S backend -G "MinGW Makefiles"
 cmake --build backend/build --target attendance_server
 cmake --build backend/build --target attendance_tests
 
-# Run the automated C++ unit tests (15/15 tests)
+# Run the automated C++ unit tests (27/27 tests across 6 suites)
 backend/build/attendance_tests
 
-# Launch the C++ backend server (listens on port 8080)
+# Launch the C++ backend server (requires JWT_SECRET >= 256 bits)
 backend/build/attendance_server
 ```
 
@@ -112,29 +112,103 @@ backend/build/attendance_server
 Output:
 ```
 ========================================================
-    AI ATTENDANCE RISK PREDICTOR - C++ TEST SUITE       
+ AI ATTENDANCE RISK PREDICTOR — REPEATABLE C++ TEST SUITE
 ========================================================
-[RUNNING] StudentHashMap: Insert, Get, Update, Remove, and Auto-Resize ... PASSED
-[RUNNING] AttendanceQueue: FIFO Enqueue, Dequeue, Peek, and Thread Safety ... PASSED
-[RUNNING] AttendanceStack: LIFO Push, Pop, Peek, and Depth Pruning ... PASSED
-[RUNNING] AttendanceSet: Add, Remove, Intersect, Union, and Difference ... PASSED
-[RUNNING] RiskDecisionTree: Hierarchical Classification of Risk Levels ... PASSED
-[RUNNING] AttendanceGraph: BFS, DFS, and Shortest Path Traversal ... PASSED
-[RUNNING] Algorithms: MergeSort and QuickSort with Metrics ... PASSED
-[RUNNING] Algorithms: LinearSearch and BinarySearch with Step Traces ... PASSED
-[RUNNING] Attendance Calculations: Present=1, Late=0.5, Absent=0, Excused=Excluded ... PASSED
-[RUNNING] Consecutive Absences: Active Backward Streak & Max Semester Streak ... PASSED
-[RUNNING] Sliding Window Analysis & Ordinary Least Squares Trend ... PASSED
-[RUNNING] Recovery Calculator: Formulas & Simulation ... PASSED
-[RUNNING] Machine Learning: Logistic Regression & Ensemble Risk Classification ... PASSED
-[RUNNING] AuthService: Hashing, Verification, and Signed Tokens ... PASSED
-[RUNNING] Database & Repositories: SQLite Persistence, Users, Students, Sessions, Undo ... PASSED
+ [DSA] StudentHashMap: Insert, Get, Update, Collision djb2, and Auto-Resize ... PASSED
+ [DSA] AttendanceQueue: FIFO Enqueue, Dequeue, Peek, Thread Safety ... PASSED
+ [DSA] AttendanceStack: LIFO Push, Pop, Peek, removeIf, Max Depth Pruning ... PASSED
+ [DSA] AttendanceSet: Add, Remove, Intersect, Unite, Difference, Subset ... PASSED
+ [DSA] AttendanceGraph: Adjacency List, BFS, DFS, Shortest Path ... PASSED
+ [Algorithms] Sorting: MergeSort and QuickSort with Swap and Comparison Counts ... PASSED
+ [Algorithms] Searching: LinearSearch vs BinarySearch Step-by-Step Traces ... PASSED
+ [Algorithms] Attendance Calculator: Rules (P=1, L=0.5, A=0, E=Excluded) ... PASSED
+ [Algorithms] Consecutive Absences: Backward Streak and Excused Exemption ... PASSED
+ [Algorithms] Sliding Window Analysis & OLS Linear Regression Trend ... PASSED
+ [Algorithms] Recovery Calculator: Exact Needed Lectures & Safe Misses ... PASSED
+ [Auth] Cryptographic OS RNG: Salt Uniqueness & Secure Token Generation ... PASSED
+ [Auth] Password Verification: Bcrypt Verification & Rejection of Foreign/Legacy Passwords ... PASSED
+ [Auth] Account Setup Token: Lockout Before Setup & Password Creation ... PASSED
+ [Auth] JWT HS256: Secret Length Requirement (>= 256 bits / 32 chars) ... PASSED
+ [Auth] JWT HS256: Claims Validation (iss, aud, iat, exp, signature, forgery) ... PASSED
+ [Database] Integrity: Parameterized CRUD, Foreign Key Enforcement, Duplicate Rejection ... PASSED
+ [Database] Transactions: Atomic Multi-Operation Rollback on Failure ... PASSED
+ [Database] Transactions: Strict Commit Success Validation ... PASSED
+ [Authorization] Faculty Subject Ownership & Enrollment Relationship Checks ... PASSED
+ [Undo] Case A: Newly Created Record Deletion ... PASSED
+ [Undo] Case B: Existing Record Correction Restoration ... PASSED
+ [ML] Prediction: Low Risk (>85% Attendance, Positive Momentum) ... PASSED
+ [ML] Prediction: 75% Boundary Condition (Borderline Medium Risk) ... PASSED
+ [ML] Prediction: High Risk (70% Attendance with Downward Drop) ... PASSED
+ [ML] Prediction: Critical Risk (<50% Attendance, Severe Streak) ... PASSED
+ [ML] Prediction: Edge Case (0 Conducted Sessions) ... PASSED
 ========================================================
- TEST RESULTS: 15 PASSED, 0 FAILED
+ FINAL RESULTS: 27 PASSED, 0 FAILED
 ========================================================
 ```
 
-### 3. Launch the Frontend Dashboard
+### 3. Run the Comprehensive Security & REST Verification Suite
+```bash
+python scripts/verify_security_and_api.py
+```
+Output:
+```
+================================================================
+🔒 RUNNING COMPREHENSIVE SECURITY & REST API VERIFICATION SUITE
+================================================================
+ [PASS] Health check returns 200 -> healthy
+ [PASS] Anonymous GET /api/analytics returns 401 Unauthorized
+ [PASS] Anonymous GET /api/subjects returns 401 Unauthorized
+ [PASS] Anonymous GET /api/students returns 401 Unauthorized
+ [PASS] Anonymous GET /api/students/:id returns 401 Unauthorized
+ [PASS] Anonymous GET /api/attendance/:studentId returns 401 Unauthorized
+ [PASS] Anonymous GET /api/risk/:studentId returns 401 Unauthorized
+ [PASS] Anonymous POST /api/prediction returns 401 Unauthorized
+ [PASS] Login with wrong password rejected with 401
+ [PASS] Login with foreign account password rejected with 401
+ [PASS] Admin login successful
+ [PASS] Faculty login successful
+ [PASS] Student login successful
+ [PASS] Forged/Tampered JWT signature rejected with 401
+ [PASS] Malformed token rejected with 401
+ [PASS] Unsigned forged token rejected with 401
+ [PASS] Student cannot create students (403)
+ [PASS] Student cannot mark attendance (403)
+ [PASS] Admin can list students
+ [PASS] Student cannot view peer attendance records (403)
+ [PASS] Student cannot view peer risk profile (403)
+ [PASS] Student can view own attendance records (200)
+ [PASS] Student can view own risk profile (200)
+ [PASS] Faculty can view assigned subjects
+ [PASS] Faculty has assigned subjects
+ [PASS] Faculty cannot mark attendance for unassigned subject (403)
+ [PASS] Admin creates student with setup token
+ [PASS] Setup token returned to admin
+ [PASS] Login on locked account rejected before setup (401)
+ [PASS] Account setup-password successful
+ [PASS] Login with newly established password successful
+ [PASS] Faculty marks attendance (200)
+ [PASS] Undo stack available
+ [PASS] Undo stack has actions
+ [PASS] Undo executes successfully
+ [PASS] Student cannot execute undo (403)
+ [PASS] Student can view own risk prediction
+ [PASS] Risk prediction has transparent methodology
+ [PASS] Simulation calculator executes
+ [PASS] Projected percentage calculated
+ [PASS] DSA benchmarks endpoint returns 200
+ [PASS] Merge Sort metrics present
+ [PASS] Quick Sort metrics present
+ [PASS] StudentHashMap lookup diagnostics present
+ [PASS] DSA graph endpoint returns 200
+ [PASS] Graph contains nodes and edges
+ [PASS] BFS traversal returned
+ [PASS] DFS traversal returned
+================================================================
+🏁 SUMMARY: 48 PASSED, 0 FAILED
+================================================================
+```
+
+### 4. Launch the Frontend Dashboard
 ```bash
 # Install frontend dependencies
 npm install
@@ -142,7 +216,7 @@ npm install
 # Start Next.js development server (port 3000)
 npm run dev
 ```
-Open **`http://localhost:3000`** in your browser. All API requests are automatically forwarded to the C++ Crow backend on port 8080.
+Open **`http://localhost:3000`** in your browser. All API requests are automatically forwarded to the C++ Crow backend on port 8080 via the Next.js reverse proxy (`BACKEND_URL`).
 
 ---
 

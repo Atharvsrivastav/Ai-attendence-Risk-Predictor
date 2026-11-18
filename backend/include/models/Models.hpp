@@ -32,7 +32,8 @@ enum class AttendanceStatus {
     PRESENT,
     ABSENT,
     LATE,
-    EXCUSED
+    EXCUSED,
+    NONE // Special status representing non-existent record prior to insertion (Case A undo)
 };
 
 inline std::string statusToString(AttendanceStatus s) {
@@ -41,6 +42,7 @@ inline std::string statusToString(AttendanceStatus s) {
         case AttendanceStatus::ABSENT: return "ABSENT";
         case AttendanceStatus::LATE: return "LATE";
         case AttendanceStatus::EXCUSED: return "EXCUSED";
+        case AttendanceStatus::NONE: return "NONE";
     }
     return "PRESENT";
 }
@@ -49,6 +51,7 @@ inline AttendanceStatus stringToStatus(const std::string& s) {
     if (s == "ABSENT") return AttendanceStatus::ABSENT;
     if (s == "LATE") return AttendanceStatus::LATE;
     if (s == "EXCUSED") return AttendanceStatus::EXCUSED;
+    if (s == "NONE") return AttendanceStatus::NONE;
     return AttendanceStatus::PRESENT;
 }
 

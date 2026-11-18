@@ -47,6 +47,7 @@ if(WIN32)
         crypto_core
         ws2_32
         mswsock
+        bcrypt
     )
 else()
     target_link_libraries(attendance_server PRIVATE
@@ -68,6 +69,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_main.cpp)
             crypto_core
             ws2_32
             mswsock
+            bcrypt
         )
     else()
         target_link_libraries(attendance_tests PRIVATE

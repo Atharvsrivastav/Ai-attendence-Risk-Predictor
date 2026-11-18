@@ -55,6 +55,19 @@ public:
     std::optional<attendance::models::UndoAction> popLatestUndoRecord(const std::string& facultyId = "");
     std::vector<attendance::models::UndoAction> findActiveUndoActions(int limit = 20);
     bool markUndoActionDone(const std::string& undoId);
+    bool deleteSessionIfEmpty(const std::string& sessionId);
+
+    // Faculty Ownership & Subject Authorization Checks
+    bool isFacultyAssignedToSubject(const std::string& facultyUserIdOrId, const std::string& subjectId);
+    bool isStudentEnrolledInSubject(const std::string& studentId, const std::string& subjectId);
+    bool isStudentEnrolledInFacultySubjects(const std::string& studentId, const std::string& facultyUserIdOrId);
+    bool isRecordOwnedByFaculty(const std::string& recordId, const std::string& facultyUserIdOrId);
+    std::vector<std::string> findFacultySubjectIds(const std::string& facultyUserIdOrId);
+    std::vector<std::string> findFacultyStudentIds(const std::string& facultyUserIdOrId);
+
+    // Secure Password Setup & Reset
+    bool updateUserPassword(const std::string& userId, const std::string& newPasswordHash);
+    std::optional<attendance::models::User> findUserBySetupToken(const std::string& setupToken);
     
     // Alert Queue
     bool saveAlertQueueItem(const attendance::models::AlertEvent& event);

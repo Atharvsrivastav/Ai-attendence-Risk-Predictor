@@ -81,34 +81,43 @@ public:
     std::unique_ptr<Statement> prepare(const std::string& sql);
     sqlite3* rawHandle() { return db_; }
 
-    void beginTransaction();
-    void commit();
-    void rollback();
+    bool beginTransaction();
+    bool commit();
+    bool rollback();
 
     int lastErrorCode() const { return db_ ? sqlite3_errcode(db_) : 0; }
     std::string lastErrorMessage() const { return db_ ? sqlite3_errmsg(db_) : "No database connection"; }
     long long lastInsertRowId() const { return db_ ? sqlite3_last_insert_rowid(db_) : 0; }
 
-    // RAII transaction guard
+    // RAII transaction guard with strict commit validation
     class ScopedTransaction {
     public:
-        explicit ScopedTransaction(Database& db) : db_(db), active_(true) {
-            db_.beginTransaction();
+        explicit ScopedTransaction(Database& db) : db_(db), active_(false) {
+            if (db_.beginTransaction()) {
+                active_ = true;
+            }
         }
         ~ScopedTransaction() {
             if (active_) {
                 db_.rollback();
-            }
-        }
-        void commit() {
-            if (active_) {
-                db_.commit();
                 active_ = false;
             }
         }
+        bool commit() {
+            if (!active_) return false;
+            if (db_.commit()) {
+                active_ = false;
+                return true;
+            } else {
+                db_.rollback();
+                active_ = false;
+                return false;
+            }
+        }
+        bool isActive() const { return active_; }
     private:
         Database& db_;
-        bool active_;
+        bool active_{false};
     };
 
 private:

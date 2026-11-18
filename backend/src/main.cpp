@@ -4,6 +4,8 @@
 #include <memory>
 #include <algorithm>
 #include <chrono>
+#include <regex>
+#include <sstream>
 
 #include "crow_all.h"
 #include "json.hpp"
@@ -21,6 +23,75 @@
 #include "dsa/StudentHashMap.hpp"
 
 using json = nlohmann::json;
+
+// Allowed Origins for CORS policy
+static std::vector<std::string> getAllowedOrigins() {
+    std::vector<std::string> origins = {
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://localhost:3000"
+    };
+    const char* envOrigins = std::getenv("CORS_ALLOWED_ORIGINS");
+    if (envOrigins) {
+        std::stringstream ss(envOrigins);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            size_t first = item.find_first_not_of(" \t\r\n");
+            size_t last = item.find_last_not_of(" \t\r\n");
+            if (first != std::string::npos && last != std::string::npos) {
+                origins.push_back(item.substr(first, last - first + 1));
+            }
+        }
+    }
+    return origins;
+}
+
+static bool isAllowedOrigin(const std::string& origin) {
+    if (origin.empty()) return false;
+    auto allowed = getAllowedOrigins();
+    for (const auto& o : allowed) {
+        if (o == origin) return true;
+    }
+    return false;
+}
+
+// CORS & JSON Response Helper (prevents wildcard origin with credentials)
+static crow::response makeJsonResponse(const crow::request& req, int code, const json& j) {
+    crow::response res(code, j.dump());
+    res.set_header("Content-Type", "application/json");
+
+    std::string origin = req.get_header_value("origin");
+    if (isAllowedOrigin(origin)) {
+        res.set_header("Access-Control-Allow-Origin", origin);
+        res.set_header("Access-Control-Allow-Credentials", "true");
+    } else if (origin.empty()) {
+        // Direct server-to-server or testing requests without origin header
+        res.set_header("Access-Control-Allow-Origin", "http://localhost:3000");
+        res.set_header("Access-Control-Allow-Credentials", "true");
+    } else {
+        // Unknown external origin: refuse credentials
+        res.set_header("Access-Control-Allow-Origin", "null");
+    }
+    res.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS");
+    res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Cookie");
+    return res;
+}
+
+// Auth Cookie formatting with HttpOnly, SameSite, and Secure flags
+static std::string makeAuthCookie(const crow::request& req, const std::string& token, int maxAge) {
+    std::string cookieStr = "auth_token=" + token + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" + std::to_string(maxAge);
+    bool isHttps = false;
+    std::string proto = req.get_header_value("x-forwarded-proto");
+    if (proto == "https") isHttps = true;
+    const char* envSecure = std::getenv("COOKIE_SECURE");
+    if (envSecure && (std::string(envSecure) == "true" || std::string(envSecure) == "1")) {
+        isHttps = true;
+    }
+    if (isHttps) {
+        cookieStr += "; Secure";
+    }
+    return cookieStr;
+}
 
 // Helper to extract JWT token from Cookie or Authorization header
 static std::string extractToken(const crow::request& req) {
@@ -58,35 +129,58 @@ static bool checkRole(const std::optional<attendance::auth::SessionClaims>& clai
     return false;
 }
 
-// Student record privacy authorization: Students can only view their own data
-static bool checkStudentAccess(const std::optional<attendance::auth::SessionClaims>& claims,
+// Student record privacy & faculty subject authorization
+static bool checkStudentAccess(attendance::repositories::AttendanceRepository& repo,
+                               const std::optional<attendance::auth::SessionClaims>& claims,
                                const std::string& targetStudentId) 
 {
-    if (!claims.has_value()) return false;
-    if (claims->role == attendance::models::UserRole::ADMIN || 
-        claims->role == attendance::models::UserRole::FACULTY) 
-    {
+    if (!claims.has_value() || targetStudentId.empty()) return false;
+    if (claims->role == attendance::models::UserRole::ADMIN) {
         return true;
     }
     if (claims->role == attendance::models::UserRole::STUDENT) {
-        return claims->studentId == targetStudentId;
+        return !claims->studentId.empty() && claims->studentId == targetStudentId;
+    }
+    if (claims->role == attendance::models::UserRole::FACULTY) {
+        std::string facultyIdent = claims->facultyId.empty() ? claims->userId : claims->facultyId;
+        return repo.isStudentEnrolledInFacultySubjects(targetStudentId, facultyIdent);
     }
     return false;
 }
 
-// CORS helper to append headers
-static crow::response makeJsonResponse(int code, const json& j) {
-    crow::response res(code, j.dump());
-    res.set_header("Content-Type", "application/json");
-    res.set_header("Access-Control-Allow-Origin", "*");
-    res.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS");
-    res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Cookie");
-    res.set_header("Access-Control-Allow-Credentials", "true");
-    return res;
+// ISO 8601 Date Validator (YYYY-MM-DD)
+static bool isValidIsoDate(const std::string& d) {
+    static const std::regex datePattern(R"(^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$)");
+    return std::regex_match(d, datePattern);
+}
+
+static std::string getCurrentUtcDate() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t tt = std::chrono::system_clock::to_time_t(now);
+    std::tm gmt;
+#ifdef _WIN32
+    gmtime_s(&gmt, &tt);
+#else
+    gmtime_r(&tt, &gmt);
+#endif
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &gmt);
+    return std::string(buf);
 }
 
 int main(int argc, char* argv[]) {
     crow::SimpleApp app;
+
+    // Fail immediately if JWT_SECRET is missing or under 256 bits (32 chars)
+    std::string jwtSecret = attendance::auth::AuthService::getJwtSecret();
+    if (jwtSecret.empty() || !attendance::auth::AuthService::validateSecret(jwtSecret)) {
+        std::cerr << "========================================================\n";
+        std::cerr << "❌ FATAL: JWT_SECRET environment variable is missing or\n";
+        std::cerr << "less than 256 bits (32 characters) long.\n";
+        std::cerr << "Insecure hardcoded fallbacks have been completely eliminated.\n";
+        std::cerr << "========================================================\n";
+        return 1;
+    }
 
     int port = 8080;
     const char* envPort = std::getenv("BACKEND_PORT");
@@ -111,7 +205,6 @@ int main(int argc, char* argv[]) {
 
     // Warm up in-memory AttendanceStack from persistent undo history on server startup
     auto activeUndos = repo.findActiveUndoActions(50);
-    // Push in chronological order so the newest ends up on top of LIFO stack
     for (auto it = activeUndos.rbegin(); it != activeUndos.rend(); ++it) {
         attendance::dsa::getGlobalUndoStack().push(*it);
     }
@@ -119,27 +212,33 @@ int main(int argc, char* argv[]) {
     // CORS preflight OPTIONS route handler
     CROW_ROUTE(app, "/api/<path>")
         .methods("OPTIONS"_method)
-    ([](const crow::request&, std::string) {
+    ([](const crow::request& req, std::string) {
         crow::response res(204);
-        res.set_header("Access-Control-Allow-Origin", "*");
+        std::string origin = req.get_header_value("origin");
+        if (isAllowedOrigin(origin)) {
+            res.set_header("Access-Control-Allow-Origin", origin);
+            res.set_header("Access-Control-Allow-Credentials", "true");
+        } else {
+            res.set_header("Access-Control-Allow-Origin", "http://localhost:3000");
+            res.set_header("Access-Control-Allow-Credentials", "true");
+        }
         res.set_header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS");
         res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Cookie");
-        res.set_header("Access-Control-Allow-Credentials", "true");
         return res;
     });
 
-    // 1. Health Check
+    // 1. GET /health (Public)
     CROW_ROUTE(app, "/health")
-    ([]() {
-        json j = {
+    ([&](const crow::request& req) {
+        return makeJsonResponse(req, 200, {
             {"status", "healthy"},
-            {"engine", "C++20 Crow REST Server with RBAC"},
-            {"version", "2.1.0"}
-        };
-        return makeJsonResponse(200, j);
+            {"timestamp", std::chrono::system_clock::now().time_since_epoch().count()},
+            {"version", "2.1.0"},
+            {"security", "Bcrypt + Strict HS256 JWT + RBAC Enforced"}
+        });
     });
 
-    // 2. POST /api/auth/login
+    // 2. POST /api/auth/login (Public)
     CROW_ROUTE(app, "/api/auth/login")
         .methods("POST"_method)
     ([&](const crow::request& req) {
@@ -149,20 +248,28 @@ int main(int argc, char* argv[]) {
             std::string password = body.value("password", "");
 
             if (email.empty() || password.empty()) {
-                return makeJsonResponse(400, {{"error", "Email and password are required"}});
+                return makeJsonResponse(req, 400, {{"error", "Email and password are required"}});
             }
 
             auto userOpt = repo.findUserByEmail(email);
             if (!userOpt) {
-                return makeJsonResponse(401, {{"error", "Invalid email or password"}});
+                return makeJsonResponse(req, 401, {{"error", "Invalid email or password"}});
             }
 
             const auto& user = *userOpt;
-            if (!attendance::auth::AuthService::verifyPassword(password, user.passwordHash)) {
-                return makeJsonResponse(401, {{"error", "Invalid email or password"}});
+
+            // Refuse login if password setup is still required
+            if (attendance::auth::AuthService::isSetupRequired(user.passwordHash)) {
+                return makeJsonResponse(req, 401, {
+                    {"error", "Account password has not been set up. Please use your activation setup token."}
+                });
             }
 
-            // Valid password authenticated! Generate signed cryptographic JWT
+            // Cryptographic Bcrypt verification against user's specific hash
+            if (!attendance::auth::AuthService::verifyPassword(password, user.passwordHash)) {
+                return makeJsonResponse(req, 401, {{"error", "Invalid email or password"}});
+            }
+
             attendance::auth::SessionClaims claims;
             claims.userId = user.id;
             claims.email = user.email;
@@ -172,6 +279,9 @@ int main(int argc, char* argv[]) {
             claims.facultyId = user.facultyId;
 
             std::string token = attendance::auth::AuthService::generateToken(claims);
+            if (token.empty()) {
+                return makeJsonResponse(req, 500, {{"error", "Failed to generate authentication token"}});
+            }
 
             json userJson = {
                 {"id", user.id},
@@ -182,40 +292,77 @@ int main(int argc, char* argv[]) {
                 {"facultyId", user.facultyId.empty() ? nullptr : json(user.facultyId)}
             };
 
-            auto res = makeJsonResponse(200, {
+            auto res = makeJsonResponse(req, 200, {
                 {"success", true},
                 {"token", token},
                 {"user", userJson}
             });
 
-            std::string cookieStr = "auth_token=" + token + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" + std::to_string(7 * 24 * 3600);
-            res.add_header("Set-Cookie", cookieStr);
+            res.add_header("Set-Cookie", makeAuthCookie(req, token, 7 * 24 * 3600));
             return res;
         } catch (...) {
-            return makeJsonResponse(400, {{"error", "Invalid JSON payload"}});
+            return makeJsonResponse(req, 400, {{"error", "Invalid JSON payload"}});
         }
     });
 
-    // 3. POST /api/auth/logout
+    // 3. POST /api/auth/setup-password (Public Account Activation)
+    CROW_ROUTE(app, "/api/auth/setup-password")
+        .methods("POST"_method)
+    ([&](const crow::request& req) {
+        try {
+            auto body = json::parse(req.body);
+            std::string token = body.value("setupToken", body.value("token", ""));
+            std::string newPassword = body.value("newPassword", body.value("password", ""));
+
+            if (token.empty() || newPassword.length() < 8) {
+                return makeJsonResponse(req, 400, {
+                    {"error", "Valid setup token and a password of at least 8 characters are required"}
+                });
+            }
+
+            auto userOpt = repo.findUserBySetupToken(token);
+            if (!userOpt) {
+                return makeJsonResponse(req, 400, {{"error", "Invalid or expired setup token"}});
+            }
+
+            if (!attendance::auth::AuthService::verifySetupToken(userOpt->passwordHash, token)) {
+                return makeJsonResponse(req, 400, {{"error", "Setup token has expired or is invalid"}});
+            }
+
+            std::string newHash = attendance::auth::AuthService::hashPassword(newPassword);
+            if (newHash.empty() || !repo.updateUserPassword(userOpt->id, newHash)) {
+                return makeJsonResponse(req, 500, {{"error", "Failed to update account password"}});
+            }
+
+            return makeJsonResponse(req, 200, {
+                {"success", true},
+                {"message", "Password successfully configured. You may now log in."}
+            });
+        } catch (...) {
+            return makeJsonResponse(req, 400, {{"error", "Invalid JSON payload"}});
+        }
+    });
+
+    // 4. POST /api/auth/logout (Public)
     CROW_ROUTE(app, "/api/auth/logout")
         .methods("POST"_method)
-    ([]() {
-        auto res = makeJsonResponse(200, {{"success", true}, {"message", "Logged out successfully"}});
-        res.add_header("Set-Cookie", "auth_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+    ([&](const crow::request& req) {
+        auto res = makeJsonResponse(req, 200, {{"success", true}, {"message", "Logged out successfully"}});
+        res.add_header("Set-Cookie", makeAuthCookie(req, "", 0));
         return res;
     });
 
-    // 4. GET /api/auth/me
+    // 5. GET /api/auth/me (Protected: Requires Authenticated Caller)
     CROW_ROUTE(app, "/api/auth/me")
     ([&](const crow::request& req) {
         auto claims = authenticateRequest(req);
         if (!claims) {
-            return makeJsonResponse(401, {{"authenticated", false}, {"user", nullptr}});
+            return makeJsonResponse(req, 401, {{"authenticated", false}, {"user", nullptr}});
         }
 
         auto userOpt = repo.findUserById(claims->userId);
         if (!userOpt) {
-            return makeJsonResponse(401, {{"authenticated", false}, {"user", nullptr}});
+            return makeJsonResponse(req, 401, {{"authenticated", false}, {"user", nullptr}});
         }
 
         const auto& u = *userOpt;
@@ -228,26 +375,53 @@ int main(int argc, char* argv[]) {
             {"facultyId", u.facultyId.empty() ? nullptr : json(u.facultyId)}
         };
 
-        return makeJsonResponse(200, {{"authenticated", true}, {"user", userJson}});
+        return makeJsonResponse(req, 200, {{"authenticated", true}, {"user", userJson}});
     });
 
-    // 5. GET /api/analytics
+    // 6. GET /api/analytics (Protected: Admin or Faculty Only)
     CROW_ROUTE(app, "/api/analytics")
     ([&](const crow::request& req) {
+        auto claims = authenticateRequest(req);
+        if (!claims) {
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
+        }
+        if (claims->role == attendance::models::UserRole::STUDENT) {
+            return makeJsonResponse(req, 403, {{"error", "Forbidden: Institutional analytics accessible to Admin or Faculty only"}});
+        }
+
         double threshold = 75.0;
         if (req.url_params.get("threshold")) {
             try { threshold = std::stod(req.url_params.get("threshold")); } catch (...) {}
         }
         auto analytics = service.getClassAnalytics(threshold);
-        return makeJsonResponse(200, analytics);
+        return makeJsonResponse(req, 200, analytics);
     });
 
-    // 6. GET /api/subjects
+    // 7. GET /api/subjects (Protected: Authenticated Users)
     CROW_ROUTE(app, "/api/subjects")
-    ([&]() {
+    ([&](const crow::request& req) {
+        auto claims = authenticateRequest(req);
+        if (!claims) {
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
+        }
+
         auto subjects = repo.findAllSubjects();
+        std::vector<std::string> allowedSubjectIds;
+
+        if (claims->role == attendance::models::UserRole::STUDENT) {
+            allowedSubjectIds = repo.findEnrolledSubjectIds(claims->studentId);
+        } else if (claims->role == attendance::models::UserRole::FACULTY) {
+            std::string fIdent = claims->facultyId.empty() ? claims->userId : claims->facultyId;
+            allowedSubjectIds = repo.findFacultySubjectIds(fIdent);
+        }
+
         json arr = json::array();
         for (const auto& s : subjects) {
+            if (claims->role != attendance::models::UserRole::ADMIN) {
+                if (std::find(allowedSubjectIds.begin(), allowedSubjectIds.end(), s.id) == allowedSubjectIds.end()) {
+                    continue;
+                }
+            }
             arr.push_back({
                 {"id", s.id},
                 {"code", s.code},
@@ -262,19 +436,19 @@ int main(int argc, char* argv[]) {
                 {"averageAttendance", s.averageAttendance}
             });
         }
-        return makeJsonResponse(200, {{"subjects", arr}});
+        return makeJsonResponse(req, 200, {{"subjects", arr}});
     });
 
-    // 7. POST /api/subjects (Protected: Admin or Faculty)
+    // 8. POST /api/subjects (Protected: Admin or Faculty)
     CROW_ROUTE(app, "/api/subjects")
         .methods("POST"_method)
     ([&](const crow::request& req) {
         auto claims = authenticateRequest(req);
         if (!claims) {
-            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
         }
         if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
-            return makeJsonResponse(403, {{"error", "Forbidden: Admin or Faculty role required"}});
+            return makeJsonResponse(req, 403, {{"error", "Forbidden: Admin or Faculty role required"}});
         }
 
         try {
@@ -285,16 +459,23 @@ int main(int argc, char* argv[]) {
             std::string facultyId = body.value("facultyId", "");
 
             if (code.empty() || name.empty()) {
-                return makeJsonResponse(400, {{"error", "Subject code and name are required"}});
+                return makeJsonResponse(req, 400, {{"error", "Subject code and name are required"}});
             }
 
-            if (facultyId.empty()) {
-                facultyId = claims->facultyId;
+            // Prevent faculty from assigning subjects to another faculty member
+            std::string fIdent = claims->facultyId.empty() ? claims->userId : claims->facultyId;
+            if (claims->role == attendance::models::UserRole::FACULTY) {
+                if (!facultyId.empty() && facultyId != fIdent && facultyId != claims->userId && facultyId != claims->facultyId) {
+                    return makeJsonResponse(req, 403, {{"error", "Forbidden: Faculty cannot assign subjects to other faculty members"}});
+                }
+                facultyId = fIdent;
+            } else if (facultyId.empty()) {
+                facultyId = fIdent;
             }
 
             auto existingSub = repo.findSubjectByCode(code);
             if (existingSub) {
-                return makeJsonResponse(400, {{"error", "Subject code already exists"}});
+                return makeJsonResponse(req, 400, {{"error", "Subject code already exists"}});
             }
 
             std::string subId = "sub_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
@@ -306,10 +487,10 @@ int main(int argc, char* argv[]) {
             s.credits = credits;
 
             if (!repo.createSubject(s)) {
-                return makeJsonResponse(500, {{"error", "Failed to create subject in database"}});
+                return makeJsonResponse(req, 500, {{"error", "Failed to create subject in database"}});
             }
 
-            return makeJsonResponse(201, {
+            return makeJsonResponse(req, 201, {
                 {"success", true},
                 {"subject", {
                     {"id", s.id},
@@ -320,17 +501,19 @@ int main(int argc, char* argv[]) {
                 }}
             });
         } catch (...) {
-            return makeJsonResponse(400, {{"error", "Invalid JSON payload"}});
+            return makeJsonResponse(req, 400, {{"error", "Invalid JSON payload"}});
         }
     });
 
-    // 8. GET /api/students (Protected: Admin or Faculty)
+    // 9. GET /api/students (Protected: Admin or Faculty Only)
     CROW_ROUTE(app, "/api/students")
     ([&](const crow::request& req) {
         auto claims = authenticateRequest(req);
-        // If caller is authenticated as Student, they cannot browse the entire student directory
-        if (claims.has_value() && claims->role == attendance::models::UserRole::STUDENT) {
-            return makeJsonResponse(403, {{"error", "Forbidden: Students cannot browse peer directory"}});
+        if (!claims) {
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
+        }
+        if (claims->role == attendance::models::UserRole::STUDENT) {
+            return makeJsonResponse(req, 403, {{"error", "Forbidden: Students cannot browse peer directory"}});
         }
 
         double threshold = 75.0;
@@ -347,7 +530,16 @@ int main(int argc, char* argv[]) {
         auto allStudents = repo.findAllStudents();
         std::vector<attendance::models::StudentAttendanceProfile> profiles;
 
+        std::string fIdent = claims->facultyId.empty() ? claims->userId : claims->facultyId;
+
         for (const auto& s : allStudents) {
+            // Faculty can access only students enrolled in their assigned subjects
+            if (claims->role == attendance::models::UserRole::FACULTY) {
+                if (!repo.isStudentEnrolledInFacultySubjects(s.id, fIdent)) {
+                    continue;
+                }
+            }
+
             auto profOpt = service.getStudentProfile(s.id, threshold);
             if (!profOpt) continue;
             const auto& p = *profOpt;
@@ -437,22 +629,22 @@ int main(int argc, char* argv[]) {
             });
         }
 
-        return makeJsonResponse(200, {
+        return makeJsonResponse(req, 200, {
             {"total", stuArray.size()},
             {"students", stuArray}
         });
     });
 
-    // 9. POST /api/students (Protected: Admin or Faculty only)
+    // 10. POST /api/students (Protected: Admin or Faculty Only)
     CROW_ROUTE(app, "/api/students")
         .methods("POST"_method)
     ([&](const crow::request& req) {
         auto claims = authenticateRequest(req);
         if (!claims) {
-            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
         }
         if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
-            return makeJsonResponse(403, {{"error", "Forbidden: Admin or Faculty role required"}});
+            return makeJsonResponse(req, 403, {{"error", "Forbidden: Admin or Faculty role required"}});
         }
 
         try {
@@ -464,15 +656,26 @@ int main(int argc, char* argv[]) {
             int semester = body.value("semester", 5);
 
             if (name.empty() || email.empty() || rollNumber.empty()) {
-                return makeJsonResponse(400, {{"error", "Name, email, and roll number are required"}});
+                return makeJsonResponse(req, 400, {{"error", "Name, email, and roll number are required"}});
             }
 
             auto existingUser = repo.findUserByEmail(email);
             if (existingUser) {
-                return makeJsonResponse(400, {{"error", "Email already exists"}});
+                return makeJsonResponse(req, 400, {{"error", "Email already exists"}});
             }
 
+            // Secure Onboarding: Generate cryptographically random setup token (no default passwords!)
+            std::string setupToken = attendance::auth::AuthService::generateSecureToken(32);
+            auto nowSec = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()
+            ).count();
+            long long setupExpiresAt = nowSec + 172800; // 48 hours validity
+            std::string lockedHash = "!SETUP_REQUIRED:" + setupToken + ":" + std::to_string(setupExpiresAt);
+
             attendance::db::Database::ScopedTransaction tx(db);
+            if (!tx.isActive()) {
+                return makeJsonResponse(req, 500, {{"error", "Database transaction failed to start"}});
+            }
 
             std::string userId = "usr_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
             std::string studentId = "stu_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
@@ -482,10 +685,10 @@ int main(int argc, char* argv[]) {
             u.email = email;
             u.name = name;
             u.role = attendance::models::UserRole::STUDENT;
-            u.passwordHash = attendance::auth::AuthService::hashPassword("student123");
+            u.passwordHash = lockedHash;
 
             if (!repo.createUser(u)) {
-                return makeJsonResponse(500, {{"error", "Failed to create user record"}});
+                return makeJsonResponse(req, 500, {{"error", "Failed to create user record"}});
             }
 
             attendance::models::Student s;
@@ -496,17 +699,20 @@ int main(int argc, char* argv[]) {
             s.semester = semester;
 
             if (!repo.createStudent(s)) {
-                return makeJsonResponse(500, {{"error", "Failed to create student record"}});
+                return makeJsonResponse(req, 500, {{"error", "Failed to create student record"}});
             }
 
+            // Auto-enroll in subjects
             auto subjects = repo.findAllSubjects();
             for (const auto& sub : subjects) {
                 repo.createEnrollment(studentId, sub.id);
             }
 
-            tx.commit();
+            if (!tx.commit()) {
+                return makeJsonResponse(req, 500, {{"error", "Failed to commit student enrollment transaction"}});
+            }
 
-            return makeJsonResponse(201, {
+            return makeJsonResponse(req, 201, {
                 {"success", true},
                 {"student", {
                     {"id", studentId},
@@ -514,19 +720,25 @@ int main(int argc, char* argv[]) {
                     {"rollNumber", rollNumber},
                     {"name", name},
                     {"email", email}
-                }}
+                }},
+                {"setupToken", setupToken},
+                {"setupUrl", "/setup-password?token=" + setupToken},
+                {"expiresIn", 172800}
             });
         } catch (...) {
-            return makeJsonResponse(400, {{"error", "Failed to enroll student"}});
+            return makeJsonResponse(req, 400, {{"error", "Failed to enroll student"}});
         }
     });
 
-    // 10. GET /api/students/<id> (Protected: Student can only access their own profile; Admin/Faculty can access any)
+    // 11. GET /api/students/<id> (Protected: Student privacy check + Faculty subject ownership)
     CROW_ROUTE(app, "/api/students/<string>")
     ([&](const crow::request& req, std::string studentId) {
         auto claims = authenticateRequest(req);
-        if (claims.has_value() && !checkStudentAccess(claims, studentId)) {
-            return makeJsonResponse(403, {{"error", "Forbidden: You are only permitted to view your own attendance profile"}});
+        if (!claims) {
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
+        }
+        if (!checkStudentAccess(repo, claims, studentId)) {
+            return makeJsonResponse(req, 403, {{"error", "Forbidden: You are not authorized to view this student's profile"}});
         }
 
         double threshold = 75.0;
@@ -536,7 +748,7 @@ int main(int argc, char* argv[]) {
 
         auto profOpt = service.getStudentProfile(studentId, threshold);
         if (!profOpt) {
-            return makeJsonResponse(404, {{"error", "Student not found"}});
+            return makeJsonResponse(req, 404, {{"error", "Student not found"}});
         }
 
         const auto& p = *profOpt;
@@ -583,10 +795,10 @@ int main(int argc, char* argv[]) {
             {"subjectWise", subMap}
         };
 
-        return makeJsonResponse(200, {{"profile", profileJson}});
+        return makeJsonResponse(req, 200, {{"profile", profileJson}});
     });
 
-    // 11. GET /api/attendance/<studentId> (Protected: Student privacy check)
+    // 12. GET /api/attendance/<studentId> (Protected)
     CROW_ROUTE(app, "/api/attendance/<string>")
     ([&](const crow::request& req, std::string studentId) {
         auto claims = authenticateRequest(req);
@@ -594,15 +806,15 @@ int main(int argc, char* argv[]) {
         // Guard against Crow routing /api/attendance/undo to this handler
         if (studentId == "undo") {
             if (!claims) {
-                return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+                return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
             }
             if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
-                return makeJsonResponse(403, {{"error", "Forbidden: Faculty or Admin role required"}});
+                return makeJsonResponse(req, 403, {{"error", "Forbidden: Faculty or Admin role required"}});
             }
 
-            auto activeUndos = repo.findActiveUndoActions(20);
+            auto activeUndosList = repo.findActiveUndoActions(20);
             json history = json::array();
-            for (const auto& a : activeUndos) {
+            for (const auto& a : activeUndosList) {
                 history.push_back({
                     {"id", a.id},
                     {"recordId", a.recordId},
@@ -615,15 +827,18 @@ int main(int argc, char* argv[]) {
                 });
             }
 
-            return makeJsonResponse(200, {
-                {"undoStackSize", activeUndos.size()},
-                {"stackSize", activeUndos.size()},
+            return makeJsonResponse(req, 200, {
+                {"undoStackSize", activeUndosList.size()},
+                {"stackSize", activeUndosList.size()},
                 {"history", history}
             });
         }
 
-        if (claims.has_value() && !checkStudentAccess(claims, studentId)) {
-            return makeJsonResponse(403, {{"error", "Forbidden: You are only permitted to view your own attendance records"}});
+        if (!claims) {
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
+        }
+        if (!checkStudentAccess(repo, claims, studentId)) {
+            return makeJsonResponse(req, 403, {{"error", "Forbidden: You are not authorized to view these attendance records"}});
         }
 
         auto detailedRecords = repo.findRecordsByStudentDetailed(studentId);
@@ -643,22 +858,22 @@ int main(int argc, char* argv[]) {
             });
         }
 
-        return makeJsonResponse(200, {
+        return makeJsonResponse(req, 200, {
             {"records", recArray},
             {"count", recArray.size()}
         });
     });
 
-    // 12. POST /api/attendance (Protected: Admin or Faculty only)
+    // 13. POST /api/attendance (Protected: Admin or Faculty Only)
     CROW_ROUTE(app, "/api/attendance")
         .methods("POST"_method)
     ([&](const crow::request& req) {
         auto claims = authenticateRequest(req);
         if (!claims) {
-            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
         }
         if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
-            return makeJsonResponse(403, {{"error", "Forbidden: Faculty or Admin role required"}});
+            return makeJsonResponse(req, 403, {{"error", "Forbidden: Faculty or Admin role required"}});
         }
 
         try {
@@ -667,24 +882,54 @@ int main(int argc, char* argv[]) {
             auto records = body.value("records", json::array());
 
             if (subjectId.empty() || records.empty() || !records.is_array()) {
-                return makeJsonResponse(400, {{"error", "Subject ID and records array required"}});
+                return makeJsonResponse(req, 400, {{"error", "Subject ID and records array required"}});
+            }
+
+            std::string fIdent = claims->facultyId.empty() ? claims->userId : claims->facultyId;
+
+            // Priority 4: Faculty subject ownership verification
+            if (claims->role == attendance::models::UserRole::FACULTY) {
+                if (!repo.isFacultyAssignedToSubject(fIdent, subjectId)) {
+                    return makeJsonResponse(req, 403, {
+                        {"error", "Forbidden: You are not assigned to teach this subject"}
+                    });
+                }
+            }
+
+            // Priority 4: Verify that all students are enrolled in the subject
+            for (const auto& r : records) {
+                std::string studentId = r.value("studentId", "");
+                if (studentId.empty() || !repo.isStudentEnrolledInSubject(studentId, subjectId)) {
+                    return makeJsonResponse(req, 400, {
+                        {"error", "Student " + studentId + " is not enrolled in subject " + subjectId}
+                    });
+                }
             }
 
             auto subOpt = repo.findSubjectById(subjectId);
             std::string subjectCode = subOpt ? subOpt->code : "SUB";
-            std::string facultyId = claims->facultyId.empty() ? (subOpt ? subOpt->facultyId : claims->userId) : claims->facultyId;
+            std::string assignedFacultyId = claims->facultyId.empty() ? (subOpt ? subOpt->facultyId : claims->userId) : claims->facultyId;
+
+            // Priority 6: Dynamic session date handling (validated YYYY-MM-DD or current UTC date)
+            std::string sessionDate = body.value("sessionDate", "");
+            if (sessionDate.empty() || !isValidIsoDate(sessionDate)) {
+                sessionDate = getCurrentUtcDate();
+            }
 
             attendance::db::Database::ScopedTransaction tx(db);
+            if (!tx.isActive()) {
+                return makeJsonResponse(req, 500, {{"error", "Database transaction failed to start"}});
+            }
 
             std::string sessionId = "ses_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
             attendance::models::AttendanceSession session;
             session.id = sessionId;
             session.subjectId = subjectId;
-            session.facultyId = facultyId;
-            session.sessionDate = "2026-11-18";
+            session.facultyId = assignedFacultyId;
+            session.sessionDate = sessionDate;
             session.topic = body.value("topic", "Lecture Session");
             if (!repo.createSession(session)) {
-                return makeJsonResponse(500, {{"error", "Failed to create attendance session"}});
+                return makeJsonResponse(req, 500, {{"error", "Failed to create attendance session"}});
             }
 
             int count = 0;
@@ -692,11 +937,6 @@ int main(int argc, char* argv[]) {
                 std::string studentId = r.value("studentId", "");
                 std::string statusStr = r.value("status", "PRESENT");
                 auto status = attendance::models::stringToStatus(statusStr);
-
-                // Check if an existing record was previously marked for this session/student
-                auto existingRec = repo.findRecordBySessionAndStudent(sessionId, studentId);
-                attendance::models::AttendanceStatus previousStatus = 
-                    existingRec ? existingRec->status : attendance::models::AttendanceStatus::EXCUSED;
 
                 std::string recordId = "rec_" + sessionId + "_" + studentId;
                 attendance::models::AttendanceRecord ar;
@@ -712,7 +952,7 @@ int main(int argc, char* argv[]) {
                 auto stu = repo.findStudentById(studentId);
                 std::string stuName = stu ? stu->name : "Student";
 
-                // Push to FIFO Alert Queue
+                // Push to Alert Queue
                 attendance::models::AlertEvent evt;
                 evt.id = "evt_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "_" + studentId;
                 evt.type = "RECORD_CREATED";
@@ -724,7 +964,7 @@ int main(int argc, char* argv[]) {
                 attendance::dsa::getGlobalAlertQueue().enqueue(evt);
                 repo.saveAlertQueueItem(evt);
 
-                // Push to LIFO Undo Stack with exact previousStatus and newStatus
+                // Priority 5 (Case A): Newly created record has previousStatus = NONE
                 attendance::models::UndoAction undo;
                 undo.id = "undo_" + recordId;
                 undo.recordId = recordId;
@@ -732,7 +972,7 @@ int main(int argc, char* argv[]) {
                 undo.studentId = studentId;
                 undo.studentName = stuName;
                 undo.subjectCode = subjectCode;
-                undo.previousStatus = previousStatus;
+                undo.previousStatus = attendance::models::AttendanceStatus::NONE;
                 undo.newStatus = status;
                 undo.facultyId = claims->userId;
                 undo.reason = "Roll call submission";
@@ -742,67 +982,85 @@ int main(int argc, char* argv[]) {
                 count++;
             }
 
-            tx.commit();
+            if (!tx.commit()) {
+                return makeJsonResponse(req, 500, {{"error", "Failed to commit attendance transaction"}});
+            }
 
-            return makeJsonResponse(200, {
+            return makeJsonResponse(req, 200, {
                 {"success", true},
                 {"sessionId", sessionId},
+                {"sessionDate", sessionDate},
                 {"recordsCount", count},
                 {"recordsProcessed", count},
                 {"undoStackDepth", attendance::dsa::getGlobalUndoStack().size()}
             });
         } catch (...) {
-            return makeJsonResponse(500, {{"error", "Failed to mark attendance"}});
+            return makeJsonResponse(req, 500, {{"error", "Failed to mark attendance"}});
         }
     });
 
-    // 13. PATCH /api/attendance (Protected: Admin or Faculty only - Status Correction)
+    // 14. PATCH /api/attendance (Protected: Admin or Faculty Only - Status Correction)
     CROW_ROUTE(app, "/api/attendance")
         .methods("PATCH"_method)
     ([&](const crow::request& req) {
         auto claims = authenticateRequest(req);
         if (!claims) {
-            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
         }
         if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
-            return makeJsonResponse(403, {{"error", "Forbidden: Faculty or Admin role required"}});
+            return makeJsonResponse(req, 403, {{"error", "Forbidden: Faculty or Admin role required"}});
         }
 
         try {
             auto body = json::parse(req.body);
             std::string recordId = body.value("recordId", "");
-            std::string newStatusStr = body.value("newStatus", "");
-            std::string reason = body.value("reason", "Manual correction by faculty");
+            std::string newStatusStr = body.value("status", "");
+            std::string reason = body.value("reason", "Faculty correction");
 
             if (recordId.empty() || newStatusStr.empty()) {
-                return makeJsonResponse(400, {{"error", "Record ID and newStatus are required"}});
+                return makeJsonResponse(req, 400, {{"error", "recordId and status are required"}});
             }
 
-            auto existingOpt = repo.findRecordById(recordId);
-            if (!existingOpt) {
-                return makeJsonResponse(404, {{"error", "Attendance record not found"}});
+            std::string fIdent = claims->facultyId.empty() ? claims->userId : claims->facultyId;
+
+            // Priority 4: Verify that the faculty owns the session/subject
+            if (claims->role == attendance::models::UserRole::FACULTY) {
+                if (!repo.isRecordOwnedByFaculty(recordId, fIdent)) {
+                    return makeJsonResponse(req, 403, {
+                        {"error", "Forbidden: You are not authorized to correct attendance for this session"}
+                    });
+                }
             }
 
-            const auto& existing = *existingOpt;
+            auto existingRecOpt = repo.findRecordById(recordId);
+            if (!existingRecOpt) {
+                return makeJsonResponse(req, 404, {{"error", "Attendance record not found"}});
+            }
+
+            const auto& existing = *existingRecOpt;
             auto previousStatus = existing.status;
             auto newStatus = attendance::models::stringToStatus(newStatusStr);
 
             attendance::db::Database::ScopedTransaction tx(db);
-
-            if (!repo.updateRecordStatus(recordId, newStatus)) {
-                return makeJsonResponse(500, {{"error", "Failed to update record in database"}});
+            if (!tx.isActive()) {
+                return makeJsonResponse(req, 500, {{"error", "Database transaction failed to start"}});
             }
 
-            // Push state change to Undo Stack
+            if (!repo.updateRecordStatus(recordId, newStatus)) {
+                return makeJsonResponse(req, 500, {{"error", "Failed to update record in database"}});
+            }
+
+            auto stu = repo.findStudentById(existing.studentId);
+            std::string stuName = stu ? stu->name : "Student";
+
+            // Priority 5 (Case B): Status correction records the actual previousStatus
             attendance::models::UndoAction undo;
-            undo.id = "undo_patch_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-            undo.recordId = existing.id;
+            undo.id = "undo_corr_" + recordId + "_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+            undo.recordId = recordId;
             undo.sessionId = existing.sessionId;
             undo.studentId = existing.studentId;
-            undo.studentName = existing.remarks; // Or student name
-            auto stuOpt = repo.findStudentById(existing.studentId);
-            if (stuOpt) undo.studentName = stuOpt->name;
-            undo.subjectCode = existing.subjectCode;
+            undo.studentName = stuName;
+            undo.subjectCode = "SUB";
             undo.previousStatus = previousStatus;
             undo.newStatus = newStatus;
             undo.facultyId = claims->userId;
@@ -811,22 +1069,24 @@ int main(int argc, char* argv[]) {
             attendance::dsa::getGlobalUndoStack().push(undo);
             repo.saveUndoRecord(undo);
 
-            // Enqueue event notification
+            // Push to alert queue
             attendance::models::AlertEvent evt;
-            evt.id = "evt_correct_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-            evt.type = "ATTENDANCE_CORRECTED";
-            evt.studentId = existing.studentId;
+            evt.id = "evt_corr_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+            evt.type = "STATUS_CORRECTED";
+            evt.studentId = undo.studentId;
             evt.studentName = undo.studentName;
             evt.subjectCode = undo.subjectCode;
-            evt.message = "Status corrected from " + attendance::models::statusToString(previousStatus) + 
+            evt.message = "Attendance corrected from " + attendance::models::statusToString(previousStatus) +
                           " to " + newStatusStr + " for " + undo.studentName;
             evt.severity = "INFO";
             attendance::dsa::getGlobalAlertQueue().enqueue(evt);
             repo.saveAlertQueueItem(evt);
 
-            tx.commit();
+            if (!tx.commit()) {
+                return makeJsonResponse(req, 500, {{"error", "Failed to commit correction transaction"}});
+            }
 
-            return makeJsonResponse(200, {
+            return makeJsonResponse(req, 200, {
                 {"success", true},
                 {"recordId", recordId},
                 {"previousStatus", attendance::models::statusToString(previousStatus)},
@@ -834,30 +1094,33 @@ int main(int argc, char* argv[]) {
                 {"undoStackDepth", attendance::dsa::getGlobalUndoStack().size()}
             });
         } catch (...) {
-            return makeJsonResponse(500, {{"error", "Failed to correct attendance"}});
+            return makeJsonResponse(req, 500, {{"error", "Failed to correct attendance"}});
         }
     });
 
-    // 14. POST /api/attendance/undo (Protected: Admin or Faculty only)
+    // 15. POST /api/attendance/undo (Protected: Admin or Faculty Only)
     CROW_ROUTE(app, "/api/attendance/undo")
         .methods("POST"_method)
     ([&](const crow::request& req) {
         auto claims = authenticateRequest(req);
         if (!claims) {
-            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
         }
         if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
-            return makeJsonResponse(403, {{"error", "Forbidden: Faculty or Admin role required"}});
+            return makeJsonResponse(req, 403, {{"error", "Forbidden: Faculty or Admin role required"}});
         }
 
         std::string facultyFilter = (claims->role == attendance::models::UserRole::ADMIN) ? "" : claims->userId;
 
         attendance::db::Database::ScopedTransaction tx(db);
+        if (!tx.isActive()) {
+            return makeJsonResponse(req, 500, {{"error", "Database transaction failed to start"}});
+        }
 
-        // Fetch latest active undo record
+        // Fetch latest active undo record for this faculty member
         auto actionOpt = repo.popLatestUndoRecord(facultyFilter);
         if (!actionOpt) {
-            return makeJsonResponse(200, {
+            return makeJsonResponse(req, 200, {
                 {"success", false},
                 {"message", "No active operations in the AttendanceStack to undo."},
                 {"stackSize", 0}
@@ -866,26 +1129,41 @@ int main(int argc, char* argv[]) {
 
         const auto& act = *actionOpt;
 
-        // Revert the record in the database
-        if (!repo.updateRecordStatus(act.recordId, act.previousStatus)) {
-            return makeJsonResponse(500, {{"error", "Failed to revert record in database"}});
+        // Priority 5: Differentiate Case A (New record deletion) vs Case B (Status restoration)
+        if (act.previousStatus == attendance::models::AttendanceStatus::NONE) {
+            // Case A: Newly created record -> DELETE record and remove empty session
+            if (!repo.deleteRecord(act.recordId)) {
+                return makeJsonResponse(req, 500, {{"error", "Failed to delete newly marked record during undo"}});
+            }
+            repo.deleteSessionIfEmpty(act.sessionId);
+        } else {
+            // Case B: Existing record correction -> Revert to exact previousStatus
+            if (!repo.updateRecordStatus(act.recordId, act.previousStatus)) {
+                return makeJsonResponse(req, 500, {{"error", "Failed to revert record in database"}});
+            }
         }
 
-        // Mark undo action as completed in SQLite
+        // Mark undo action as completed in SQLite audit history
         if (!repo.markUndoActionDone(act.id)) {
-            return makeJsonResponse(500, {{"error", "Failed to update undo record state"}});
+            return makeJsonResponse(req, 500, {{"error", "Failed to update undo record state"}});
         }
 
-        // Pop from in-memory stack
-        attendance::dsa::getGlobalUndoStack().pop();
+        // Pop exact action from in-memory stack (avoids popping someone else's action)
+        attendance::dsa::getGlobalUndoStack().removeIf([&](const auto& a) { return a.id == act.id; });
 
-        tx.commit();
+        if (!tx.commit()) {
+            return makeJsonResponse(req, 500, {{"error", "Failed to commit undo transaction"}});
+        }
 
-        return makeJsonResponse(200, {
+        std::string actionDesc = (act.previousStatus == attendance::models::AttendanceStatus::NONE)
+            ? "Deleted attendance entry for " + act.studentName + " in " + act.subjectCode
+            : "Reverted attendance for " + act.studentName + " in " + act.subjectCode +
+              " back to " + attendance::models::statusToString(act.previousStatus) + 
+              " (was " + attendance::models::statusToString(act.newStatus) + ")";
+
+        return makeJsonResponse(req, 200, {
             {"success", true},
-            {"message", "Reverted attendance for " + act.studentName + " in " + act.subjectCode +
-                        " back to " + attendance::models::statusToString(act.previousStatus) + 
-                        " (was " + attendance::models::statusToString(act.newStatus) + ")"},
+            {"message", actionDesc},
             {"undoneAction", {
                 {"id", act.id},
                 {"recordId", act.recordId},
@@ -898,20 +1176,20 @@ int main(int argc, char* argv[]) {
         });
     });
 
-    // 15. GET /api/attendance/undo (Protected: Admin or Faculty only)
+    // 16. GET /api/attendance/undo (Protected: Admin or Faculty Only)
     CROW_ROUTE(app, "/api/attendance/undo")
     ([&](const crow::request& req) {
         auto claims = authenticateRequest(req);
         if (!claims) {
-            return makeJsonResponse(401, {{"error", "Unauthorized: Authentication required"}});
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
         }
         if (!checkRole(claims, {attendance::models::UserRole::ADMIN, attendance::models::UserRole::FACULTY})) {
-            return makeJsonResponse(403, {{"error", "Forbidden: Faculty or Admin role required"}});
+            return makeJsonResponse(req, 403, {{"error", "Forbidden: Faculty or Admin role required"}});
         }
 
-        auto activeUndos = repo.findActiveUndoActions(20);
+        auto activeUndosList = repo.findActiveUndoActions(20);
         json history = json::array();
-        for (const auto& a : activeUndos) {
+        for (const auto& a : activeUndosList) {
             history.push_back({
                 {"id", a.id},
                 {"recordId", a.recordId},
@@ -924,19 +1202,22 @@ int main(int argc, char* argv[]) {
             });
         }
 
-        return makeJsonResponse(200, {
-            {"undoStackSize", activeUndos.size()},
-            {"stackSize", activeUndos.size()},
+        return makeJsonResponse(req, 200, {
+            {"undoStackSize", activeUndosList.size()},
+            {"stackSize", activeUndosList.size()},
             {"history", history}
         });
     });
 
-    // 16. GET /api/risk/<studentId> (Protected: Student privacy check)
+    // 17. GET /api/risk/<studentId> (Protected: Student privacy check + Faculty subject ownership)
     CROW_ROUTE(app, "/api/risk/<string>")
     ([&](const crow::request& req, std::string studentId) {
         auto claims = authenticateRequest(req);
-        if (claims.has_value() && !checkStudentAccess(claims, studentId)) {
-            return makeJsonResponse(403, {{"error", "Forbidden: You are only permitted to view your own risk predictions"}});
+        if (!claims) {
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
+        }
+        if (!checkStudentAccess(repo, claims, studentId)) {
+            return makeJsonResponse(req, 403, {{"error", "Forbidden: You are not authorized to view risk predictions for this student"}});
         }
 
         double threshold = 75.0;
@@ -946,7 +1227,7 @@ int main(int argc, char* argv[]) {
 
         auto profOpt = service.getStudentProfile(studentId, threshold);
         if (!profOpt) {
-            return makeJsonResponse(404, {{"error", "Student profile not found"}});
+            return makeJsonResponse(req, 404, {{"error", "Student profile not found"}});
         }
 
         const auto& p = *profOpt;
@@ -958,7 +1239,7 @@ int main(int argc, char* argv[]) {
 
         auto prediction = attendance::ml::RiskPredictor::predict(statuses, threshold);
 
-        return makeJsonResponse(200, {
+        return makeJsonResponse(req, 200, {
             {"studentId", studentId},
             {"studentName", p.name},
             {"rollNumber", p.rollNumber},
@@ -975,10 +1256,15 @@ int main(int argc, char* argv[]) {
         });
     });
 
-    // 17. POST /api/prediction (What-If Simulation; Protected)
+    // 18. POST /api/prediction (What-If Simulation; Protected)
     CROW_ROUTE(app, "/api/prediction")
         .methods("POST"_method)
     ([&](const crow::request& req) {
+        auto claims = authenticateRequest(req);
+        if (!claims) {
+            return makeJsonResponse(req, 401, {{"error", "Unauthorized: Authentication required"}});
+        }
+
         try {
             auto body = json::parse(req.body);
             std::string studentId = body.value("studentId", "");
@@ -986,14 +1272,18 @@ int main(int argc, char* argv[]) {
             int missNext = body.value("missNext", 0);
             double threshold = body.value("threshold", 75.0);
 
-            auto claims = authenticateRequest(req);
-            if (claims.has_value() && !studentId.empty() && !checkStudentAccess(claims, studentId)) {
-                return makeJsonResponse(403, {{"error", "Forbidden: Students can only run simulations for themselves"}});
+            // Students can only run simulations for themselves
+            if (claims->role == attendance::models::UserRole::STUDENT) {
+                studentId = claims->studentId;
+            }
+
+            if (!checkStudentAccess(repo, claims, studentId)) {
+                return makeJsonResponse(req, 403, {{"error", "Forbidden: You are not authorized to run simulations for this student"}});
             }
 
             auto profOpt = service.getStudentProfile(studentId, threshold);
             if (!profOpt) {
-                return makeJsonResponse(404, {{"error", "Student profile not found"}});
+                return makeJsonResponse(req, 404, {{"error", "Student profile not found"}});
             }
             const auto& p = *profOpt;
 
@@ -1011,21 +1301,21 @@ int main(int argc, char* argv[]) {
             }
             auto projectedRisk = attendance::ml::RiskPredictor::predict(simulatedRecords, threshold);
 
-            return makeJsonResponse(200, json{
+            return makeJsonResponse(req, 200, json{
                 {"success", true},
+                {"studentId", studentId},
                 {"current", {
                     {"attendancePercentage", p.overallPercentage},
-                    {"riskCategory", p.riskCategory},
-                    {"riskScore", p.riskScore}
+                    {"totalSessions", p.totalSessionsConducted},
+                    {"attendedSessions", p.totalSessionsAttended},
+                    {"absentSessions", p.totalSessionsAbsent}
                 }},
                 {"simulation", {
-                    {"additionalAttended", sim.additionalAttended},
-                    {"additionalMissed", sim.additionalMissed},
-                    {"projectedTotalSessions", sim.projectedTotalSessions},
-                    {"projectedAttendedSessions", sim.projectedAttendedSessions},
+                    {"attendNext", attendNext},
+                    {"missNext", missNext},
                     {"projectedPercentage", sim.projectedPercentage},
-                    {"meetsThreshold", sim.meetsThreshold},
-                    {"deltaPercentage", sim.deltaPercentage}
+                    {"eligible", sim.meetsThreshold},
+                    {"difference", sim.deltaPercentage}
                 }},
                 {"projectedRisk", {
                     {"category", attendance::models::riskToString(projectedRisk.riskCategory)},
@@ -1037,11 +1327,11 @@ int main(int argc, char* argv[]) {
                 }}
             });
         } catch (...) {
-            return makeJsonResponse(400, {{"error", "Failed to run prediction simulation"}});
+            return makeJsonResponse(req, 400, {{"error", "Failed to run prediction simulation"}});
         }
     });
 
-    // 18. GET /api/dsa/benchmark
+    // 19. GET /api/dsa/benchmark
     CROW_ROUTE(app, "/api/dsa/benchmark")
     ([&](const crow::request& req) {
         auto allStudents = repo.findAllStudents();
@@ -1088,7 +1378,7 @@ int main(int argc, char* argv[]) {
         lookupBench["hashAlgorithm"] = "djb2 polynomial rolling hash";
         lookupBench["amortizedTimeComplexity"] = "O(1)";
 
-        return makeJsonResponse(200, json{
+        return makeJsonResponse(req, 200, json{
             {"success", true},
             {"datasetSize", profiles.size()},
             {"sorting", {
@@ -1129,7 +1419,7 @@ int main(int argc, char* argv[]) {
         });
     });
 
-    // 19. GET /api/dsa/graph
+    // 20. GET /api/dsa/graph
     CROW_ROUTE(app, "/api/dsa/graph")
     ([&](const crow::request& req) {
         attendance::dsa::AttendanceGraph graph;
@@ -1188,7 +1478,7 @@ int main(int argc, char* argv[]) {
 
         auto graphJson = graph.toJson();
 
-        return makeJsonResponse(200, json{
+        return makeJsonResponse(req, 200, json{
             {"success", true},
             {"startNode", startNode},
             {"graph", graphJson},
@@ -1211,7 +1501,7 @@ int main(int argc, char* argv[]) {
     std::cout << "========================================================\n";
     std::cout << "Listening on port " << port << " ...\n";
     std::cout << "Database connected: " << dbPath << "\n";
-    std::cout << "Security: Bcrypt Auth + HS256 Signed JWT + RBAC Enforced\n";
+    std::cout << "Security: OS RNG Bcrypt + Strict HS256 JWT + RBAC Enforced\n";
     std::cout << "All REST APIs and DSA benchmarks online!\n";
     std::cout << "========================================================\n";
 

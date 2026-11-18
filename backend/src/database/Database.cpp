@@ -98,19 +98,19 @@ std::unique_ptr<Database::Statement> Database::prepare(const std::string& sql) {
     return std::make_unique<Statement>(db_, stmt);
 }
 
-void Database::beginTransaction() {
+bool Database::beginTransaction() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    execute("BEGIN IMMEDIATE TRANSACTION;");
+    return execute("BEGIN IMMEDIATE TRANSACTION;");
 }
 
-void Database::commit() {
+bool Database::commit() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    execute("COMMIT;");
+    return execute("COMMIT;");
 }
 
-void Database::rollback() {
+bool Database::rollback() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    execute("ROLLBACK;");
+    return execute("ROLLBACK;");
 }
 
 } // namespace attendance::db

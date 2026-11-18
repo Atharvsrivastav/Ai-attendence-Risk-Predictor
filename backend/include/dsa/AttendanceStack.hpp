@@ -4,6 +4,7 @@
 #include <vector>
 #include <mutex>
 #include <optional>
+#include <functional>
 #include "models/Models.hpp"
 
 namespace attendance::dsa {
@@ -62,6 +63,26 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         top_ = nullptr;
         count_ = 0;
+    }
+
+    bool removeIf(std::function<bool(const T&)> predicate) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!top_) return false;
+        if (predicate(top_->value)) {
+            top_ = top_->next;
+            count_--;
+            return true;
+        }
+        auto cur = top_;
+        while (cur->next) {
+            if (predicate(cur->next->value)) {
+                cur->next = cur->next->next;
+                count_--;
+                return true;
+            }
+            cur = cur->next;
+        }
+        return false;
     }
 
     std::vector<T> toArray() const {

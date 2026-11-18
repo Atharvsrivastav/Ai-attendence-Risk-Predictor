@@ -18,6 +18,8 @@ prisma/*.db-journal
 *.db-shm
 *.db-wal
 *.db-journal
+database/test_*.db
+database/backups/
 
 # Debug logs
 npm-debug.log*

@@ -4,9 +4,18 @@
 #include <chrono>
 #include <vector>
 #include <cstdlib>
-#include <random>
 #include <cstring>
+#include <iostream>
 #include "json.hpp"
+
+#ifdef _WIN32
+#include <windows.h>
+#include <bcrypt.h>
+#else
+#include <sys/random.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,7 +28,52 @@ extern "C" {
 
 namespace attendance::auth {
 
-// Constant-time comparison to prevent timing side-channel attacks
+// Cryptographically secure operating system random bytes generator
+bool AuthService::getSecureRandomBytes(void* buffer, size_t length) {
+    if (!buffer || length == 0) return false;
+
+#ifdef _WIN32
+    NTSTATUS status = BCryptGenRandom(
+        NULL,
+        static_cast<PUCHAR>(buffer),
+        static_cast<ULONG>(length),
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG
+    );
+    return BCRYPT_SUCCESS(status);
+#else
+    ssize_t ret = getrandom(buffer, length, 0);
+    if (ret == static_cast<ssize_t>(length)) return true;
+
+    // Fallback to /dev/urandom on POSIX
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) return false;
+    size_t total = 0;
+    while (total < length) {
+        ssize_t r = read(fd, static_cast<char*>(buffer) + total, length - total);
+        if (r <= 0) {
+            close(fd);
+            return false;
+        }
+        total += static_cast<size_t>(r);
+    }
+    close(fd);
+    return true;
+#endif
+}
+
+std::string AuthService::generateSecureToken(size_t byteCount) {
+    std::vector<uint8_t> buffer(byteCount);
+    if (!getSecureRandomBytes(buffer.data(), byteCount)) {
+        // Fallback should never happen on modern OS
+        return "";
+    }
+    std::stringstream ss;
+    for (uint8_t b : buffer) {
+        ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(b);
+    }
+    return ss.str();
+}
+
 bool AuthService::constantTimeEquals(const std::string& a, const std::string& b) {
     if (a.length() != b.length()) return false;
     unsigned char result = 0;
@@ -29,23 +83,25 @@ bool AuthService::constantTimeEquals(const std::string& a, const std::string& b)
     return result == 0;
 }
 
+bool AuthService::validateSecret(const std::string& secret) {
+    // Requires at least 256 bits (32 bytes) of cryptographic material
+    return secret.length() >= 32;
+}
+
 std::string AuthService::getJwtSecret() {
     const char* envSecret = std::getenv("JWT_SECRET");
-    if (envSecret && std::strlen(envSecret) > 0) {
+    if (envSecret && std::strlen(envSecret) >= 32) {
         return std::string(envSecret);
     }
-    // Secure fallback if not provided in environment
-    return "attendance_risk_prediction_secure_jwt_secret_key_2026_prod";
+    // Hardcoded fallback completely eliminated
+    return "";
 }
 
 std::string AuthService::hashPassword(const std::string& plainPassword) {
-    // Generate standard 16-byte random salt for bcrypt
-    std::random_device rd;
-    std::mt19937_64 gen(rd());
-    std::uniform_int_distribution<uint32_t> dis(0, 255);
     char saltBytes[16];
-    for (int i = 0; i < 16; i++) {
-        saltBytes[i] = static_cast<char>(dis(gen));
+    if (!getSecureRandomBytes(saltBytes, 16)) {
+        std::cerr << "AuthService error: Cryptographic RNG failure for salt generation." << std::endl;
+        return "";
     }
 
     char setting[64];
@@ -62,29 +118,67 @@ std::string AuthService::hashPassword(const std::string& plainPassword) {
 bool AuthService::verifyPassword(const std::string& plainPassword, const std::string& storedHash) {
     if (plainPassword.empty() || storedHash.empty()) return false;
 
+    // If account has not completed initial setup, refuse normal login
+    if (isSetupRequired(storedHash)) {
+        return false;
+    }
+
     // Verify OpenBSD / standard bcrypt hash ($2a$ or $2b$)
-    if (storedHash.find("$2a$") == 0 || storedHash.find("$2b$") == 0) {
+    if (storedHash.rfind("$2a$", 0) == 0 || storedHash.rfind("$2b$", 0) == 0) {
         char hashOut[128] = {0};
         char* res = _crypt_blowfish_rn(plainPassword.c_str(), storedHash.c_str(), hashOut, sizeof(hashOut));
         if (!res) return false;
         return constantTimeEquals(std::string(hashOut), storedHash);
     }
 
-    // Legacy SHA-256 with salt check
-    if (storedHash.find("$sha256$") == 0) {
-        std::string salted = "salt_attend_" + plainPassword + "_2026_cse";
-        unsigned long long h1 = 14695981039346656037ULL;
-        unsigned long long h2 = 1099511628211ULL;
-        for (unsigned char c : salted) {
-            h1 = (h1 ^ c) * 1099511628211ULL;
-            h2 = (h2 + c * 31) ^ h1;
-        }
-        std::stringstream ss;
-        ss << "$sha256$" << std::hex << std::setfill('0') << std::setw(16) << h1 << std::setw(16) << h2;
-        return constantTimeEquals(ss.str(), storedHash);
+    // Custom $sha256$ legacy password verification removed entirely
+    return false;
+}
+
+bool AuthService::isSetupRequired(const std::string& storedHash) {
+    return storedHash.rfind("!SETUP_REQUIRED:", 0) == 0;
+}
+
+bool AuthService::verifySetupToken(const std::string& storedHash, const std::string& providedToken) {
+    if (!isSetupRequired(storedHash) || providedToken.empty()) return false;
+
+    // Expected format: !SETUP_REQUIRED:<token>:<expiryEpoch>
+    size_t firstColon = storedHash.find(':', 16);
+    if (firstColon == std::string::npos) {
+        std::string expectedToken = storedHash.substr(16);
+        return constantTimeEquals(expectedToken, providedToken);
     }
 
-    return false;
+    std::string expectedToken = storedHash.substr(16, firstColon - 16);
+    std::string expStr = storedHash.substr(firstColon + 1);
+
+    long long expEpoch = 0;
+    try {
+        expEpoch = std::stoll(expStr);
+    } catch (...) {
+        return false;
+    }
+
+    auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+
+    if (now >= expEpoch) {
+        return false; // Token expired
+    }
+
+    return constantTimeEquals(expectedToken, providedToken);
+}
+
+static bool isValidBase64Url(const std::string& str) {
+    if (str.empty()) return false;
+    for (char c : str) {
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || 
+              (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static std::string base64UrlEncode(const uint8_t* data, size_t len) {
@@ -108,6 +202,7 @@ static std::string base64UrlEncodeStr(const std::string& str) {
 }
 
 static std::string base64UrlDecode(const std::string& in) {
+    if (!isValidBase64Url(in)) return "";
     std::string out;
     std::vector<int> T(256, -1);
     for (int i = 0; i < 64; i++) {
@@ -115,7 +210,7 @@ static std::string base64UrlDecode(const std::string& in) {
     }
     int val = 0, valb = -8;
     for (unsigned char c : in) {
-        if (T[c] == -1) break;
+        if (T[c] == -1) return "";
         val = (val << 6) + T[c];
         valb += 6;
         if (valb >= 0) {
@@ -144,7 +239,6 @@ static void computeHmacSha256(const std::string& key, const std::string& data, u
         opad[i] = k[i] ^ 0x5c;
     }
 
-    // Inner hash: SHA256(ipad || data)
     uint8_t innerHash[32];
     SHA256_CTX innerCtx;
     sha256_init(&innerCtx);
@@ -152,7 +246,6 @@ static void computeHmacSha256(const std::string& key, const std::string& data, u
     sha256_update(&innerCtx, reinterpret_cast<const BYTE*>(data.data()), data.length());
     sha256_final(&innerCtx, innerHash);
 
-    // Outer hash: SHA256(opad || innerHash)
     SHA256_CTX outerCtx;
     sha256_init(&outerCtx);
     sha256_update(&outerCtx, opad, 64);
@@ -162,6 +255,9 @@ static void computeHmacSha256(const std::string& key, const std::string& data, u
 
 std::string AuthService::generateToken(const SessionClaims& claims, const std::string& secretKey) {
     std::string secret = secretKey.empty() ? getJwtSecret() : secretKey;
+    if (secret.empty() || !validateSecret(secret)) {
+        return "";
+    }
 
     nlohmann::json header = {
         {"alg", "HS256"},
@@ -177,6 +273,8 @@ std::string AuthService::generateToken(const SessionClaims& claims, const std::s
         : iatSeconds + (7 * 24 * 3600); // 7 days
 
     nlohmann::json payload = {
+        {"iss", "attendance-risk-predictor"},
+        {"aud", "attendance-risk-client"},
         {"userId", claims.userId},
         {"email", claims.email},
         {"name", claims.name},
@@ -201,6 +299,9 @@ std::string AuthService::generateToken(const SessionClaims& claims, const std::s
 std::optional<SessionClaims> AuthService::verifyToken(const std::string& token, const std::string& secretKey) {
     if (token.empty()) return std::nullopt;
     std::string secret = secretKey.empty() ? getJwtSecret() : secretKey;
+    if (secret.empty() || !validateSecret(secret)) {
+        return std::nullopt;
+    }
 
     size_t d1 = token.find('.');
     size_t d2 = token.rfind('.');
@@ -216,12 +317,17 @@ std::optional<SessionClaims> AuthService::verifyToken(const std::string& token, 
         return std::nullopt;
     }
 
+    if (!isValidBase64Url(hEnc) || !isValidBase64Url(pEnc) || !isValidBase64Url(sEnc)) {
+        return std::nullopt;
+    }
+
     // 1. Verify Header Algorithm
     try {
         std::string headerJson = base64UrlDecode(hEnc);
+        if (headerJson.empty()) return std::nullopt;
         auto h = nlohmann::json::parse(headerJson);
         if (h.value("alg", "") != "HS256" || h.value("typ", "") != "JWT") {
-            return std::nullopt; // Reject unsupported algorithm
+            return std::nullopt;
         }
     } catch (...) {
         return std::nullopt;
@@ -234,21 +340,41 @@ std::optional<SessionClaims> AuthService::verifyToken(const std::string& token, 
     std::string expectedSigEnc = base64UrlEncode(expectedSigRaw, 32);
 
     if (!constantTimeEquals(sEnc, expectedSigEnc)) {
-        return std::nullopt; // Forged or invalid signature rejected
+        return std::nullopt;
     }
 
-    // 3. Payload and Expiration Validation
+    // 3. Payload and Claims Validation
     try {
         std::string payloadJson = base64UrlDecode(pEnc);
+        if (payloadJson.empty()) return std::nullopt;
         auto p = nlohmann::json::parse(payloadJson);
 
-        long long exp = p.value("exp", 0LL);
+        // Validate Issuer and Audience
+        if (p.value("iss", "") != "attendance-risk-predictor" ||
+            p.value("aud", "") != "attendance-risk-client") {
+            return std::nullopt;
+        }
+
+        // Validate exp claim (Must be present, positive, and in the future)
+        if (!p.contains("exp") || !p["exp"].is_number_integer()) {
+            return std::nullopt;
+        }
+        long long exp = p["exp"].get<long long>();
         auto now = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()
         ).count();
 
-        if (exp > 0 && now >= exp) {
-            return std::nullopt; // Expired token rejected
+        if (exp <= 0 || now >= exp) {
+            return std::nullopt;
+        }
+
+        // Validate iat claim (Must be present, positive, and not in far future)
+        if (!p.contains("iat") || !p["iat"].is_number_integer()) {
+            return std::nullopt;
+        }
+        long long iat = p["iat"].get<long long>();
+        if (iat <= 0 || iat > now + 300) {
+            return std::nullopt;
         }
 
         SessionClaims c;
@@ -258,10 +384,12 @@ std::optional<SessionClaims> AuthService::verifyToken(const std::string& token, 
         c.role = attendance::models::stringToRole(p.value("role", "STUDENT"));
         c.studentId = p.value("studentId", "");
         c.facultyId = p.value("facultyId", "");
-        c.issuedAt = p.value("iat", 0LL);
+        c.issuedAt = iat;
         c.expiresAt = exp;
 
-        if (c.userId.empty()) return std::nullopt;
+        if (c.userId.empty() || c.email.empty()) {
+            return std::nullopt;
+        }
         return c;
     } catch (...) {
         return std::nullopt;

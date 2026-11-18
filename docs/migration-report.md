@@ -48,7 +48,7 @@ This report provides a comprehensive, feature-by-feature audit documenting the c
 ## 4. Test Suite Execution Results
 
 ### A. Isolated C++ Unit Test Suite (`backend/build/attendance_tests.exe`)
-All 21 comprehensive C++ unit and algorithm tests passed with 0 failures on an isolated in-memory test database:
+All 27 comprehensive C++ unit, algorithm, and security tests passed with 0 failures on an isolated test database:
 
 ```
 ========================================================
@@ -57,7 +57,7 @@ All 21 comprehensive C++ unit and algorithm tests passed with 0 failures on an i
 
  [DSA] StudentHashMap: Insert, Get, Update, Collision djb2, and Auto-Resize ... PASSED
  [DSA] AttendanceQueue: FIFO Enqueue, Dequeue, Peek, Thread Safety ... PASSED
- [DSA] AttendanceStack: LIFO Push, Pop, Peek, Max Depth Pruning ... PASSED
+ [DSA] AttendanceStack: LIFO Push, Pop, Peek, removeIf, Max Depth Pruning ... PASSED
  [DSA] AttendanceSet: Add, Remove, Intersect, Unite, Difference, Subset ... PASSED
  [DSA] AttendanceGraph: Adjacency List, BFS, DFS, Shortest Path ... PASSED
  [Algorithms] Sorting: MergeSort and QuickSort with Swap and Comparison Counts ... PASSED
@@ -66,11 +66,17 @@ All 21 comprehensive C++ unit and algorithm tests passed with 0 failures on an i
  [Algorithms] Consecutive Absences: Backward Streak and Excused Exemption ... PASSED
  [Algorithms] Sliding Window Analysis & OLS Linear Regression Trend ... PASSED
  [Algorithms] Recovery Calculator: Exact Needed Lectures & Safe Misses ... PASSED
- [Auth] Password Verification: Bcrypt Verification & Rejection of Foreign Passwords ... PASSED
- [Auth] JWT HS256: Signature Verification, Expiration, Forgery Rejection ... PASSED
+ [Auth] Cryptographic OS RNG: Salt Uniqueness & Secure Token Generation ... PASSED
+ [Auth] Password Verification: Bcrypt Verification & Rejection of Foreign/Legacy Passwords ... PASSED
+ [Auth] Account Setup Token: Lockout Before Setup & Password Creation ... PASSED
+ [Auth] JWT HS256: Secret Length Requirement (>= 256 bits / 32 chars) ... PASSED
+ [Auth] JWT HS256: Claims Validation (iss, aud, iat, exp, signature, forgery) ... PASSED
  [Database] Integrity: Parameterized CRUD, Foreign Key Enforcement, Duplicate Rejection ... PASSED
  [Database] Transactions: Atomic Multi-Operation Rollback on Failure ... PASSED
- [Undo] Lifecycle: PRESENT -> Undo, LATE -> Undo, Exact State Restoration ... PASSED
+ [Database] Transactions: Strict Commit Success Validation ... PASSED
+ [Authorization] Faculty Subject Ownership & Enrollment Relationship Checks ... PASSED
+ [Undo] Case A: Newly Created Record Deletion ... PASSED
+ [Undo] Case B: Existing Record Correction Restoration ... PASSED
  [ML] Prediction: Low Risk (>85% Attendance, Positive Momentum) ... PASSED
  [ML] Prediction: 75% Boundary Condition (Borderline Medium Risk) ... PASSED
  [ML] Prediction: High Risk (70% Attendance with Downward Drop) ... PASSED
@@ -78,6 +84,22 @@ All 21 comprehensive C++ unit and algorithm tests passed with 0 failures on an i
  [ML] Prediction: Edge Case (0 Conducted Sessions) ... PASSED
 
 ========================================================
+ FINAL RESULTS: 27 PASSED, 0 FAILED
+========================================================
+```
+
+### B. End-to-End REST API & Security Verification Suite (`scripts/verify_security_and_api.py`)
+All 48 security, RBAC, session, undo lifecycle, ML, and DSA benchmark tests passed with 0 failures:
+- 7 Anonymous protected endpoint rejection tests (all return 401)
+- 5 Password authentication & foreign password rejection tests
+- 3 JWT signature tampering & unsigned token rejection tests
+- 7 RBAC & student peer privacy tests (all return 403 on cross-student access)
+- 3 Faculty subject ownership & cross-subject authorization tests
+- 5 Student setup token creation, locked login rejection, and setup-password activation tests
+- 5 Attendance marking, undo stack, and atomic undo lifecycle tests
+- 4 ML risk prediction and What-If simulation tests
+- 8 DSA benchmarks & graph traversal tests
+- Final Summary: **48 PASSED, 0 FAILED**.
  FINAL RESULTS: 21 PASSED, 0 FAILED
 ========================================================
 ```

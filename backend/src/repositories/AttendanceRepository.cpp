@@ -650,6 +650,152 @@ bool AttendanceRepository::markUndoActionDone(const std::string& undoId) {
     return stmt->execute();
 }
 
+bool AttendanceRepository::deleteSessionIfEmpty(const std::string& sessionId) {
+    auto stmt = db_.prepare("SELECT COUNT(*) FROM attendance_records WHERE session_id = ?;");
+    if (!stmt) return false;
+    stmt->bind(1, sessionId);
+    if (stmt->step() && stmt->getInt(0) == 0) {
+        auto delStmt = db_.prepare("DELETE FROM attendance_sessions WHERE id = ?;");
+        if (delStmt) {
+            delStmt->bind(1, sessionId);
+            return delStmt->execute();
+        }
+    }
+    return false;
+}
+
+bool AttendanceRepository::isFacultyAssignedToSubject(const std::string& facultyUserIdOrId, const std::string& subjectId) {
+    if (facultyUserIdOrId.empty() || subjectId.empty()) return false;
+    auto stmt = db_.prepare(
+        "SELECT 1 FROM subjects s "
+        "LEFT JOIN faculty f ON s.faculty_id = f.id "
+        "WHERE s.id = ? AND (s.faculty_id = ? OR f.user_id = ? OR f.id = ?);"
+    );
+    if (!stmt) return false;
+    stmt->bind(1, subjectId);
+    stmt->bind(2, facultyUserIdOrId);
+    stmt->bind(3, facultyUserIdOrId);
+    stmt->bind(4, facultyUserIdOrId);
+    return stmt->step();
+}
+
+bool AttendanceRepository::isStudentEnrolledInSubject(const std::string& studentId, const std::string& subjectId) {
+    if (studentId.empty() || subjectId.empty()) return false;
+    auto stmt = db_.prepare("SELECT 1 FROM enrollments WHERE student_id = ? AND subject_id = ?;");
+    if (!stmt) return false;
+    stmt->bind(1, studentId);
+    stmt->bind(2, subjectId);
+    return stmt->step();
+}
+
+bool AttendanceRepository::isStudentEnrolledInFacultySubjects(const std::string& studentId, const std::string& facultyUserIdOrId) {
+    if (studentId.empty() || facultyUserIdOrId.empty()) return false;
+    auto stmt = db_.prepare(
+        "SELECT 1 FROM enrollments e "
+        "JOIN subjects s ON e.subject_id = s.id "
+        "LEFT JOIN faculty f ON s.faculty_id = f.id "
+        "WHERE e.student_id = ? AND (s.faculty_id = ? OR f.user_id = ? OR f.id = ?);"
+    );
+    if (!stmt) return false;
+    stmt->bind(1, studentId);
+    stmt->bind(2, facultyUserIdOrId);
+    stmt->bind(3, facultyUserIdOrId);
+    stmt->bind(4, facultyUserIdOrId);
+    return stmt->step();
+}
+
+bool AttendanceRepository::isRecordOwnedByFaculty(const std::string& recordId, const std::string& facultyUserIdOrId) {
+    if (recordId.empty() || facultyUserIdOrId.empty()) return false;
+    auto stmt = db_.prepare(
+        "SELECT 1 FROM attendance_records rec "
+        "JOIN attendance_sessions ses ON rec.session_id = ses.id "
+        "JOIN subjects sub ON ses.subject_id = sub.id "
+        "LEFT JOIN faculty f ON sub.faculty_id = f.id "
+        "WHERE rec.id = ? AND (ses.faculty_id = ? OR sub.faculty_id = ? OR f.user_id = ? OR f.id = ?);"
+    );
+    if (!stmt) return false;
+    stmt->bind(1, recordId);
+    stmt->bind(2, facultyUserIdOrId);
+    stmt->bind(3, facultyUserIdOrId);
+    stmt->bind(4, facultyUserIdOrId);
+    stmt->bind(5, facultyUserIdOrId);
+    return stmt->step();
+}
+
+std::vector<std::string> AttendanceRepository::findFacultySubjectIds(const std::string& facultyUserIdOrId) {
+    std::vector<std::string> ids;
+    if (facultyUserIdOrId.empty()) return ids;
+    auto stmt = db_.prepare(
+        "SELECT s.id FROM subjects s "
+        "LEFT JOIN faculty f ON s.faculty_id = f.id "
+        "WHERE s.faculty_id = ? OR f.user_id = ? OR f.id = ?;"
+    );
+    if (!stmt) return ids;
+    stmt->bind(1, facultyUserIdOrId);
+    stmt->bind(2, facultyUserIdOrId);
+    stmt->bind(3, facultyUserIdOrId);
+    while (stmt->step()) {
+        ids.push_back(stmt->getString(0));
+    }
+    return ids;
+}
+
+std::vector<std::string> AttendanceRepository::findFacultyStudentIds(const std::string& facultyUserIdOrId) {
+    std::vector<std::string> ids;
+    if (facultyUserIdOrId.empty()) return ids;
+    auto stmt = db_.prepare(
+        "SELECT DISTINCT e.student_id FROM enrollments e "
+        "JOIN subjects s ON e.subject_id = s.id "
+        "LEFT JOIN faculty f ON s.faculty_id = f.id "
+        "WHERE s.faculty_id = ? OR f.user_id = ? OR f.id = ?;"
+    );
+    if (!stmt) return ids;
+    stmt->bind(1, facultyUserIdOrId);
+    stmt->bind(2, facultyUserIdOrId);
+    stmt->bind(3, facultyUserIdOrId);
+    while (stmt->step()) {
+        ids.push_back(stmt->getString(0));
+    }
+    return ids;
+}
+
+bool AttendanceRepository::updateUserPassword(const std::string& userId, const std::string& newPasswordHash) {
+    auto stmt = db_.prepare("UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;");
+    if (!stmt) return false;
+    stmt->bind(1, newPasswordHash);
+    stmt->bind(2, userId);
+    return stmt->execute();
+}
+
+std::optional<attendance::models::User> AttendanceRepository::findUserBySetupToken(const std::string& setupToken) {
+    if (setupToken.empty()) return std::nullopt;
+    std::string pattern = "%!SETUP_REQUIRED:" + setupToken + ":%";
+    auto stmt = db_.prepare(
+        "SELECT u.id, u.email, u.password_hash, u.name, u.role, u.created_at, u.updated_at, "
+        "       s.id AS studentId, f.id AS facultyId "
+        "FROM users u "
+        "LEFT JOIN students s ON u.id = s.user_id "
+        "LEFT JOIN faculty f ON u.id = f.user_id "
+        "WHERE u.password_hash LIKE ?;"
+    );
+    if (!stmt) return std::nullopt;
+    stmt->bind(1, pattern);
+    if (stmt->step()) {
+        attendance::models::User u;
+        u.id = stmt->getString(0);
+        u.email = stmt->getString(1);
+        u.passwordHash = stmt->getString(2);
+        u.name = stmt->getString(3);
+        u.role = attendance::models::stringToRole(stmt->getString(4));
+        u.createdAt = stmt->getString(5);
+        u.updatedAt = stmt->getString(6);
+        u.studentId = stmt->isNull(7) ? "" : stmt->getString(7);
+        u.facultyId = stmt->isNull(8) ? "" : stmt->getString(8);
+        return u;
+    }
+    return std::nullopt;
+}
+
 bool AttendanceRepository::saveAlertQueueItem(const attendance::models::AlertEvent& event) {
     auto stmt = db_.prepare(
         "INSERT INTO alert_queue_items (id, event_type, student_id, student_name, subject_code, message, severity, is_processed) "
